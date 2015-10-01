@@ -13,8 +13,8 @@ public class DuplicateFileRemover {
 
     private FileHelper helper;
 
-    public DuplicateFileRemover(String srcDirPath, String dstDirPath) {
-        this.helper = new FileHelper(srcDirPath, dstDirPath);
+    public DuplicateFileRemover(String srcDirPath) {
+        this.helper = new FileHelper(srcDirPath);
     }
 
     public FileHelper getHelper() {
@@ -24,7 +24,7 @@ public class DuplicateFileRemover {
     public static void main(String[] args) {
         try {
             LocalTime start = LocalTime.now();
-            DuplicateFileRemover dfr = new DuplicateFileRemover("d:\\foty\\xperiaM2\\", "d:\\testy\\uniq\\");
+            DuplicateFileRemover dfr = new DuplicateFileRemover("d:\\foty\\xperiaM2\\");
             dfr.getHelper().processDuplicates();
             LocalTime stop = LocalTime.now();
             System.out.println(dfr.getDurationInfo(start, stop));

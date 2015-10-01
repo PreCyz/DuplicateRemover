@@ -18,9 +18,9 @@ public class FileHelper {
     private Map<String, File> noDuplicatesMap;
     private List<File> duplicatesList;
 
-    public FileHelper(String dirPath, String destDir) {
+    public FileHelper(String dirPath) {
         this.dirPath = dirPath;
-        this.destDir = destDir;
+        this.destDir = String.format("%sduplikaty\\", dirPath);
     }
     
     protected List<File> getPossibleDuplicates(){
@@ -101,25 +101,31 @@ public class FileHelper {
     
     protected byte[] getByteArrayFromFile(File file) throws FileNotFoundException
             , IOException {
-        FileInputStream fis = new FileInputStream(file);
-        byte[] byteArray = new byte[(int)file.length()];
-        fis.read(byteArray);
-        fis.close();
+        byte[] byteArray;
+        try (FileInputStream fis = new FileInputStream(file)) {
+            byteArray = new byte[(int)file.length()];
+            fis.read(byteArray);
+            fis.close();
+        }
         return byteArray;
     }
     
-    protected void moveDuplicates() {
+    protected void moveDuplicates() throws IOException {
+        Path dstDir = Paths.get(destDir);
+        if(!Files.exists(dstDir)){
+            Files.createDirectory(dstDir);
+        }
         List<File> pomList = new ArrayList<>();
         pomList.addAll(duplicatesList);
         pomList.forEach(file -> {
             try {
-                Path srcPath = Paths.get(file.getAbsolutePath());
-                Path dstPath = Paths.get(String.format("%s%s", destDir, file.getName()));
-                Files.move(srcPath, dstPath, StandardCopyOption.REPLACE_EXISTING);
+                Path source = Paths.get(file.getAbsolutePath());
+                Path destination = Paths.get(String.format("%s%s", destDir, file.getName()));
+                Files.move(source, destination, StandardCopyOption.REPLACE_EXISTING);
                 System.out.println(
                         String.format("Duplikat %s przeniesiony do %s"
                                 , file.getName()
-                                , dstPath.toString()
+                                , destination.toString()
                         )
                 );
                 duplicatesList.remove(file);

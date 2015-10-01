@@ -17,11 +17,10 @@ public class FileHelperTest {
 private FileHelper helper;
     private final String FILE_NOT_FOUND = "FileNotFoundException expected.";
     private final String dirPath = "d:\\testy\\";
-    private final String uniqPath = "d:\\testy\\uniq\\";
     
     @Before
     public void setUp(){
-        helper = new FileHelper(dirPath, uniqPath);
+        helper = new FileHelper(dirPath);
     }
     
     @After
@@ -78,7 +77,7 @@ private FileHelper helper;
         assertNotNull(possibleDuplicate);
         assertNotNull(noDuplicatesMap);
         assertEquals(3, possibleDuplicate.size());
-        assertEquals(2, noDuplicatesMap.size());
+        assertEquals(6, noDuplicatesMap.size());
     }
     
     @Test

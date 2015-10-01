@@ -13,7 +13,7 @@ public class DuplicateFileRemoverTest {
     
     @Before
     public void setUp() {
-        dfr = new DuplicateFileRemover("aa", "bb");
+        dfr = new DuplicateFileRemover("aa");
     }
     
     @After
