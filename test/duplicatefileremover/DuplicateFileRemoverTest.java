@@ -48,4 +48,48 @@ public class DuplicateFileRemoverTest {
         stop = start.plus(seconds);
         assertEquals("Czas trwania: 1[m].", dfr.getDurationInfo(start, stop));
     }
+    
+    @Test
+    public void testRunArgument() throws Exception{
+        String[] args;
+        try{
+            args = null;
+            DuplicateFileRemover.validateArgs(args);
+            fail();
+        } catch(UnsupportedOperationException ex){
+            assertEquals("Nie podano scieżki do katalogu.", ex.getMessage());
+        }
+        
+        try{
+            args = new String[]{};
+            DuplicateFileRemover.validateArgs(args);
+            fail();
+        } catch(UnsupportedOperationException ex){
+            assertEquals("Nie podano scieżki do katalogu.", ex.getMessage());
+        }
+        
+        try{
+            args = new String[]{""};
+            DuplicateFileRemover.validateArgs(args);
+            fail();
+        } catch(UnsupportedOperationException ex){
+            assertEquals("Niewłaściwy parametr.", ex.getMessage());
+        }
+        
+        try{
+            args = new String[]{null};
+            DuplicateFileRemover.validateArgs(args);
+            fail();
+        } catch(UnsupportedOperationException ex){
+            assertEquals("Niewłaściwy parametr.", ex.getMessage());
+        }
+        
+        try{
+            args = new String[]{" "};
+            DuplicateFileRemover.validateArgs(args);
+            fail();
+        } catch(UnsupportedOperationException ex){
+            assertEquals("Niewłaściwy parametr.", ex.getMessage());
+        }
+    }
 }

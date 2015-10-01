@@ -23,12 +23,14 @@ public class DuplicateFileRemover {
 
     public static void main(String[] args) {
         try {
+            validateArgs(args);
+            String sourcePath = args[0];
             LocalTime start = LocalTime.now();
-            DuplicateFileRemover dfr = new DuplicateFileRemover("d:\\foty\\xperiaM2\\");
+            DuplicateFileRemover dfr = new DuplicateFileRemover(sourcePath);
             dfr.getHelper().processDuplicates();
             LocalTime stop = LocalTime.now();
             System.out.println(dfr.getDurationInfo(start, stop));
-        } catch (NoSuchAlgorithmException | IOException ex) {
+        } catch (NoSuchAlgorithmException | IOException | UnsupportedOperationException ex) {
             System.out.println(ex.getMessage());
         }
     }
@@ -45,5 +47,14 @@ public class DuplicateFileRemover {
             return String.format("Czas trwania: %d[m].", duration.getSeconds() / oneMinute);
         }
         return String.format("Czas trwania: %d[s].", duration.getSeconds());
+    }
+
+    protected static void validateArgs(String[] args) {
+        if(args == null || args.length == 0){
+            throw new UnsupportedOperationException("Nie podano scieżki do katalogu.");
+        }
+        if(args[0] == null || "".equals(args[0].trim())){
+            throw new UnsupportedOperationException("Niewłaściwy parametr.");
+        }
     }
 }
