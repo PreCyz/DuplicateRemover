@@ -23,37 +23,30 @@ public class FileHelper {
         this.destDir = destDir;
     }
     
-    protected List<File> getFileOnlyList() {
-        File dir = new File(dirPath);
-        List<File> onlyFileList = Arrays.asList(dir.listFiles())
-                .stream()
-                .filter(file -> file.isFile())
-                .collect(Collectors.toList());
-        return onlyFileList;
+    protected List<File> getPossibleDuplicates(){
+        return possibleDuplicates;
+    }
+    protected Map<String, File> getNoDuplicatesMap(){
+        return noDuplicatesMap;
+    }
+    protected List<File> getDuplicatesList() {
+        return duplicatesList;
     }
     
-    protected String getSHAHashForFile(File file) throws NoSuchAlgorithmException
-            , FileNotFoundException, IOException {
-        MessageDigest md = MessageDigest.getInstance("SHA-512");
-        byte[] dataBytes = getByteArrayFromFile(file);
-        byte[] mdbytes = md.digest(dataBytes);
-
-        StringBuilder hexString = new StringBuilder();
-        for (int i = 0; i < mdbytes.length; i++) {
-            hexString.append(Integer.toHexString(0xFF & mdbytes[i]));
+    public void processDuplicates() throws NoSuchAlgorithmException, IOException {
+        createPossibleDuplicateFileList();
+        possibleDuplicates.forEach(file -> {
+            System.out.println(String.format("Potencjalny duplikat: %s", file.getName()));
+        });
+        createDuplicatesList();
+        duplicatesList.forEach(file -> {
+            System.out.println(String.format("Duplikat: %s", file.getName()));
+        });
+        if(!duplicatesList.isEmpty()){
+            moveDuplicates();
         }
-        return hexString.toString();
     }
-
-    protected byte[] getByteArrayFromFile(File file) throws FileNotFoundException
-            , IOException {
-        FileInputStream fis = new FileInputStream(file);
-        byte[] byteArray = new byte[(int)file.length()];
-        fis.read(byteArray);
-        fis.close();
-        return byteArray;
-    }
-
+    
     protected void createPossibleDuplicateFileList() {
         List<File> fileList = getFileOnlyList();
         possibleDuplicates = new ArrayList<>();
@@ -68,14 +61,15 @@ public class FileHelper {
         });
     }
     
-    protected List<File> getPossibleDuplicates(){
-        return possibleDuplicates;
+    protected List<File> getFileOnlyList() {
+        File dir = new File(dirPath);
+        List<File> onlyFileList = Arrays.asList(dir.listFiles())
+                .stream()
+                .filter(file -> file.isFile())
+                .collect(Collectors.toList());
+        return onlyFileList;
     }
     
-    protected Map<String, File> getNoDuplicatesMap(){
-        return noDuplicatesMap;
-    }
-
     protected void createDuplicatesList() throws NoSuchAlgorithmException, IOException {
         duplicatesList = new ArrayList<>();
         for(File possibleDuplicate : possibleDuplicates){
@@ -90,15 +84,30 @@ public class FileHelper {
                 }
             }
         }
-        duplicatesList.forEach(file -> {
-            System.out.println(String.format("Duplikat: %s", file.getName()));
-        });
     }
+    
+    protected String getSHAHashForFile(File file) throws NoSuchAlgorithmException
+            , FileNotFoundException, IOException {
+        MessageDigest md = MessageDigest.getInstance("SHA-512");
+        byte[] dataBytes = getByteArrayFromFile(file);
+        byte[] mdbytes = md.digest(dataBytes);
 
-    protected List<File> getDuplicatesList() {
-        return duplicatesList;
+        StringBuilder hexString = new StringBuilder();
+        for (int i = 0; i < mdbytes.length; i++) {
+            hexString.append(Integer.toHexString(0xFF & mdbytes[i]));
+        }
+        return hexString.toString();
     }
-
+    
+    protected byte[] getByteArrayFromFile(File file) throws FileNotFoundException
+            , IOException {
+        FileInputStream fis = new FileInputStream(file);
+        byte[] byteArray = new byte[(int)file.length()];
+        fis.read(byteArray);
+        fis.close();
+        return byteArray;
+    }
+    
     protected void moveDuplicates() {
         List<File> pomList = new ArrayList<>();
         pomList.addAll(duplicatesList);
@@ -118,19 +127,5 @@ public class FileHelper {
                 System.out.println("Nie można przenieść pliku."+ex.getMessage());
             }
         });
-    }
-
-    public void processDuplicates() throws NoSuchAlgorithmException, IOException {
-        createPossibleDuplicateFileList();
-        possibleDuplicates.forEach(file -> {
-            System.out.println(String.format("Potencjalny duplikat: %s", file.getName()));
-        });
-        createDuplicatesList();
-        duplicatesList.forEach(file -> {
-            System.out.println(String.format("Duplikat: %s", file.getName()));
-        });
-        if(!duplicatesList.isEmpty()){
-            moveDuplicates();
-        }
     }
 }

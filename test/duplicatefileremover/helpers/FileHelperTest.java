@@ -32,7 +32,7 @@ private FileHelper helper;
     @Test
     public void testFileList() {
         assertNotNull(helper.getFileOnlyList());
-        assertEquals(4, helper.getFileOnlyList().size());
+        assertEquals(6, helper.getFileOnlyList().size());
     }
     
     @Test 
@@ -77,7 +77,7 @@ private FileHelper helper;
         Map<String, File> noDuplicatesMap = helper.getNoDuplicatesMap();
         assertNotNull(possibleDuplicate);
         assertNotNull(noDuplicatesMap);
-        assertEquals(2, possibleDuplicate.size());
+        assertEquals(3, possibleDuplicate.size());
         assertEquals(2, noDuplicatesMap.size());
     }
     

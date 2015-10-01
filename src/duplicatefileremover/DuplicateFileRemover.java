@@ -3,8 +3,7 @@ package duplicatefileremover;
 import duplicatefileremover.helpers.FileHelper;
 import java.io.IOException;
 import java.security.NoSuchAlgorithmException;
-import java.time.Duration;
-import java.time.LocalTime;
+import java.time.*;
 
 /**
  *
