@@ -26,7 +26,6 @@ public class DuplicateFileRemover {
         try {
             LocalTime start = LocalTime.now();
             DuplicateFileRemover dfr = new DuplicateFileRemover("d:\\foty\\xperiaM2\\", "d:\\testy\\uniq\\");
-            //dfr.getHelper().copyUniqFiles();
             dfr.getHelper().processDuplicates();
             LocalTime stop = LocalTime.now();
             System.out.println(dfr.getDurationInfo(start, stop));

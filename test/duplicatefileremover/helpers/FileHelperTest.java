@@ -69,35 +69,6 @@ private FileHelper helper;
             assertTrue(FILE_NOT_FOUND, true);
         }
     }
-    /*
-    @Test
-    public void testUniqMapOfHashesAndFiles() throws Exception{
-        assertNotNull(helper.getUniqHashFileMap());
-        assertFalse(helper.getUniqHashFileMap().isEmpty());
-        assertEquals(2, helper.getUniqHashFileMap().size());
-    }
-    
-    @Test
-    public void testShow() throws Exception{
-        helper.copyUniqFiles();
-    }
-    
-    @Test
-    public void testCopyFile() throws Exception{
-        assertTrue(helper.copyFile(new File("d:\\wjazd.ods")));
-        try{
-            helper.copyFile(new File(""));
-        } catch (FileNotFoundException ex){
-            assertTrue(FILE_NOT_FOUND, true);
-        }
-    }
-    
-    @Test
-    public void testCopyUniqFiles() throws Exception{
-        helper.copyUniqFiles();
-        File actual = new File(uniqPath);
-        assertTrue(actual.listFiles().length > 1);
-    }*/
     
     @Test
     public void testGetPossibleDuplicateFileList() throws Exception{
