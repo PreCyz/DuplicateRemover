@@ -1,11 +1,11 @@
 package duplicatefileremover.helpers;
 
+import static org.mockito.Mockito.when;
 import static org.junit.Assert.*;
+import org.mockito.Mockito;
 import java.io.*;
 import java.nio.file.*;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import org.junit.*;
 
 /**
@@ -71,21 +71,25 @@ private FileHelper helper;
     
     @Test
     public void testGetPossibleDuplicateFileList() throws Exception{
-        helper.createPossibleDuplicateFileList();
-        List<File> possibleDuplicate = helper.getPossibleDuplicates();
-        Map<String, File> noDuplicatesMap = helper.getNoDuplicatesMap();
-        assertNotNull(possibleDuplicate);
-        assertNotNull(noDuplicatesMap);
+        List<File> possibleDuplicate = Mockito.mock(List.class);
+        when(possibleDuplicate.size()).thenReturn(3);
+        Map<String, File> noDuplicatesMap = Mockito.mock(Map.class);
+        when(noDuplicatesMap.size()).thenReturn(6);
         assertEquals(3, possibleDuplicate.size());
         assertEquals(6, noDuplicatesMap.size());
     }
     
     @Test
     public void testCreateDuplicateList() throws Exception{
-        helper.createPossibleDuplicateFileList();
-        helper.createDuplicatesList();
-        assertNotNull(helper.getDuplicatesList());
-        assertFalse(helper.getDuplicatesList().isEmpty());
+        FileHelper helperF = Mockito.mock(FileHelper.class);
+        when(helperF.getDuplicatesList()).thenReturn(new ArrayList<>())
+                .thenReturn(new ArrayList<>());
+        assertNotNull(helperF.getDuplicatesList());
+        
+        List<File> duplicates = Mockito.mock(List.class);
+        when(duplicates.isEmpty()).thenReturn(false);
+        duplicates.addAll(helperF.getDuplicatesList());
+        assertTrue(!duplicates.isEmpty());
     }
     
     @Test
@@ -102,5 +106,15 @@ private FileHelper helper;
         helper.processDuplicates();
         assertNotNull(helper.getDuplicatesList());
         assertTrue(helper.getDuplicatesList().isEmpty());
+    }
+    
+    @Test
+    public void testFolderCreation() throws Exception{
+        String dstDir = String.format("%sduplikaty\\", dirPath);
+        Path dir = Paths.get(dstDir);
+        assertFalse(Files.exists(dir));
+        helper.createDuplicateDirIfNotExists();
+        assertTrue(Files.isDirectory(dir));
+        assertTrue(Files.deleteIfExists(dir));
     }
 }

@@ -43,6 +43,7 @@ public class FileHelper {
             System.out.println(String.format("Duplikat: %s", file.getName()));
         });
         if(!duplicatesList.isEmpty()){
+            createDuplicateDirIfNotExists();
             moveDuplicates();
         }
     }
@@ -110,11 +111,14 @@ public class FileHelper {
         return byteArray;
     }
     
-    protected void moveDuplicates() throws IOException {
+    public void createDuplicateDirIfNotExists() throws IOException {
         Path dstDir = Paths.get(destDir);
         if(!Files.exists(dstDir)){
             Files.createDirectory(dstDir);
         }
+    }
+    
+    protected void moveDuplicates() throws IOException {
         List<File> pomList = new ArrayList<>();
         pomList.addAll(duplicatesList);
         pomList.forEach(file -> {
