@@ -2,6 +2,6 @@
 
 echo Start ChangeFileName
 
-java -jar DuplicateFileRemover.jar d:\\foty\\
+java -jar .\dist\DuplicateFileRemover.jar d:\\foty\\xperiaM2\\
 
 pause
