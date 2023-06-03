@@ -3,3 +3,6 @@
 /nbproject/
 manifest.mf
 build.xml
+/target
+*.iml
+.idea
