@@ -35,17 +35,21 @@ public class DuplicateFileRemoverTest {
 
         Duration minutes = Duration.ofMinutes(3);
         stop = start.plus(minutes);
-        assertThat(dfr.getDurationInfo(start, stop)).isEqualTo("Duration: 0[h]:3[m]:0[s].");
+        assertThat(dfr.getDurationInfo(start, stop)).isEqualTo("0[h]:3[m]:0[s]:0[milli].");
         minutes = Duration.ofMinutes(60);
         stop = start.plus(minutes);
-        assertThat(dfr.getDurationInfo(start, stop)).isEqualTo("Duration: 1[h]:0[m]:0[s].");
+        assertThat(dfr.getDurationInfo(start, stop)).isEqualTo("1[h]:0[m]:0[s]:0[milli].");
 
         Duration seconds = Duration.ofSeconds(4);
         stop = start.plus(seconds);
-        assertThat(dfr.getDurationInfo(start, stop)).isEqualTo("Duration: 0[h]:0[m]:4[s].");
+        assertThat(dfr.getDurationInfo(start, stop)).isEqualTo("0[h]:0[m]:4[s]:0[milli].");
         seconds = Duration.ofSeconds(60);
         stop = start.plus(seconds);
-        assertThat(dfr.getDurationInfo(start, stop)).isEqualTo("Duration: 0[h]:1[m]:0[s].");
+        assertThat(dfr.getDurationInfo(start, stop)).isEqualTo("0[h]:1[m]:0[s]:0[milli].");
+
+        Duration milli = Duration.ofMillis(4);
+        stop = start.plus(milli);
+        assertThat(dfr.getDurationInfo(start, stop)).isEqualTo("0[h]:0[m]:0[s]:4[milli].");
     }
 
     @Test

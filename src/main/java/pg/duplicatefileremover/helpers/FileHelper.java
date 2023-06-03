@@ -51,6 +51,7 @@ public class FileHelper {
 
     protected void createPossibleDuplicateFileList() {
         List<File> fileList = getFileOnlyList();
+        System.out.printf("Processing [%d] files.%n", fileList.size());
         possibleDuplicates = new ArrayList<>();
         noDuplicatesMap = new HashMap<>();
         fileList.forEach((file) -> {

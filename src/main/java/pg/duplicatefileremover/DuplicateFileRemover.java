@@ -26,14 +26,15 @@ public class DuplicateFileRemover {
         try {
             validateArgs(args);
             for (String arg : args) {
+                System.out.printf("Processing path [%s]. ", arg);
                 try {
                     LocalTime start = LocalTime.now();
                     DuplicateFileRemover dfr = new DuplicateFileRemover(arg);
                     dfr.getHelper().processDuplicates();
                     LocalTime stop = LocalTime.now();
-                    System.out.printf("Path %s processed. %s%n", arg, dfr.getDurationInfo(start, stop));
+                    System.out.printf("Finished - duration: %s%n", dfr.getDurationInfo(start, stop));
                 } catch (NoSuchAlgorithmException | IOException ex) {
-                    System.err.printf("Path %s finished with error %s%n", arg, ex.getMessage());
+                    System.err.printf("Path [%s] finished with error %s%n", arg, ex.getMessage());
                 }
             }
         } catch (UnsupportedOperationException ex) {
@@ -43,10 +44,11 @@ public class DuplicateFileRemover {
 
     public String getDurationInfo(LocalTime begin, LocalTime end) {
         Duration duration = Duration.between(begin, end);
-        return String.format("Duration: %d[h]:%d[m]:%d[s].",
+        return String.format("%d[h]:%d[m]:%d[s]:%d[milli].",
                 duration.toHoursPart(),
                 duration.toMinutesPart(),
-                duration.toSecondsPart()
+                duration.toSecondsPart(),
+                duration.toMillisPart()
         );
     }
 
