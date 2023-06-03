@@ -7,7 +7,9 @@ import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.LocalTime;
 
-/** @author Gawa */
+/**
+ * @author Gawa
+ */
 public class DuplicateFileRemover {
 
     private final FileHelper helper;
@@ -23,13 +25,18 @@ public class DuplicateFileRemover {
     public static void main(String[] args) {
         try {
             validateArgs(args);
-            String sourcePath = args[0];
-            LocalTime start = LocalTime.now();
-            DuplicateFileRemover dfr = new DuplicateFileRemover(sourcePath);
-            dfr.getHelper().processDuplicates();
-            LocalTime stop = LocalTime.now();
-            System.out.println(dfr.getDurationInfo(start, stop));
-        } catch (NoSuchAlgorithmException | IOException | UnsupportedOperationException ex) {
+            for (String arg : args) {
+                try {
+                    LocalTime start = LocalTime.now();
+                    DuplicateFileRemover dfr = new DuplicateFileRemover(arg);
+                    dfr.getHelper().processDuplicates();
+                    LocalTime stop = LocalTime.now();
+                    System.out.println(dfr.getDurationInfo(start, stop));
+                } catch (NoSuchAlgorithmException | IOException ex) {
+                    System.err.printf("Path %s finished with error %s%n", arg, ex.getMessage());
+                }
+            }
+        } catch (UnsupportedOperationException ex) {
             System.out.println(ex.getMessage());
         }
     }
