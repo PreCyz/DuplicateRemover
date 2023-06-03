@@ -2,10 +2,13 @@ package pg.duplicatefileremover;
 
 import pg.duplicatefileremover.helpers.FileHelper;
 
+import java.io.File;
 import java.io.IOException;
+import java.nio.file.Paths;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.LocalTime;
+import java.util.LinkedList;
 
 /**
  * @author Gawa
@@ -26,19 +29,40 @@ public class DuplicateFileRemover {
         try {
             validateArgs(args);
             for (String arg : args) {
-                System.out.printf("Processing path [%s]. ", arg);
-                try {
-                    LocalTime start = LocalTime.now();
-                    DuplicateFileRemover dfr = new DuplicateFileRemover(arg);
-                    dfr.getHelper().processDuplicates();
-                    LocalTime stop = LocalTime.now();
-                    System.out.printf("Finished - duration: %s%n", dfr.getDurationInfo(start, stop));
-                } catch (NoSuchAlgorithmException | IOException ex) {
-                    System.err.printf("Path [%s] finished with error %s%n", arg, ex.getMessage());
-                }
+                processPath(arg);
+
             }
         } catch (UnsupportedOperationException ex) {
             System.out.println(ex.getMessage());
+        }
+    }
+
+    private static void processPath(String path) {
+        File[] files = Paths.get(path).toFile().listFiles();
+        if (files == null) return;
+
+        LinkedList<File> dirList = new LinkedList<>();
+        for (File dir : files) {
+            if (dir.isDirectory()) {
+                dirList.add(dir);
+            }
+        }
+        if (!dirList.isEmpty()) {
+            dirList.forEach(d -> processPath(d.getAbsolutePath()));
+        }
+        processDir(path);
+    }
+
+    private static void processDir(String arg) {
+        System.out.printf("Processing path [%s]. ", arg);
+        try {
+            LocalTime start = LocalTime.now();
+            DuplicateFileRemover dfr = new DuplicateFileRemover(arg);
+            dfr.getHelper().processDuplicates();
+            LocalTime stop = LocalTime.now();
+            System.out.printf("Finished - duration: %s%n", dfr.getDurationInfo(start, stop));
+        } catch (NoSuchAlgorithmException | IOException ex) {
+            System.err.printf("Path [%s] finished with error %s%n", arg, ex.getMessage());
         }
     }
 
