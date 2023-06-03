@@ -31,7 +31,7 @@ public class DuplicateFileRemover {
                     DuplicateFileRemover dfr = new DuplicateFileRemover(arg);
                     dfr.getHelper().processDuplicates();
                     LocalTime stop = LocalTime.now();
-                    System.out.println(dfr.getDurationInfo(start, stop));
+                    System.out.printf("Path %s processed. %s%n", arg, dfr.getDurationInfo(start, stop));
                 } catch (NoSuchAlgorithmException | IOException ex) {
                     System.err.printf("Path %s finished with error %s%n", arg, ex.getMessage());
                 }
