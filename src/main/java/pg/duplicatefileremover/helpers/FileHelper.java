@@ -2,7 +2,8 @@ package pg.duplicatefileremover.helpers;
 
 import java.io.*;
 import java.nio.file.*;
-import java.security.*;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.*;
 
 /**
@@ -63,7 +64,10 @@ public class FileHelper {
     }
 
     protected List<File> getFileOnlyList() {
-        return Arrays.stream(Objects.requireNonNull(dirPath.toFile().listFiles()))
+        if (dirPath == null || dirPath.toFile().isFile()) {
+            return new ArrayList<>();
+        }
+        return Arrays.stream(Optional.ofNullable(dirPath.toFile().listFiles()).orElseGet(() -> new File[0]))
                 .filter(File::isFile)
                 .toList();
     }

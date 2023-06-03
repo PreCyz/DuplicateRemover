@@ -4,7 +4,8 @@ import pg.duplicatefileremover.helpers.FileHelper;
 
 import java.io.IOException;
 import java.security.NoSuchAlgorithmException;
-import java.time.*;
+import java.time.Duration;
+import java.time.LocalTime;
 
 /** @author Gawa */
 public class DuplicateFileRemover {
