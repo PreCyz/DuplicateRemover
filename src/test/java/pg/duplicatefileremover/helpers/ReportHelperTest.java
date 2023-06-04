@@ -7,7 +7,7 @@ import pg.duplicatefileremover.TestBase;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
-import java.util.List;
+import java.util.*;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -17,8 +17,11 @@ class ReportHelperTest extends TestBase {
 
     @Test
     void givenEmptyList_whenCreateReport_thenGenerateEmptyReport(@TempDir Path tempDir) throws IOException {
-        List<File> duplicates = List.of(createFile("number.txt", tempDir).toFile());
-        reportHelper = new ReportHelper(duplicates, duplicates, tempDir.resolve("report.html"));
+        Path resource = createFile("number.txt", tempDir);
+        Map<String, List<File>> duplicatesMap = new LinkedHashMap<>();
+        duplicatesMap.put(String.valueOf(resource.toFile().length()), List.of(resource.toFile(), resource.toFile()));
+
+        reportHelper = new ReportHelper(duplicatesMap, tempDir.resolve("report.html"));
         reportHelper.createReport();
         assertThat(tempDir.resolve("report.html").toFile().exists()).isTrue();
 

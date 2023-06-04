@@ -17,7 +17,7 @@ public class FileHelper {
     private final Path dirPath;
     private final Path destDir;
     private final boolean moveDuplicates;
-    private Map<String, File> noDuplicatesMap;
+    private Map<String, List<File>> filesMap;
 
     public FileHelper(String dirPath) {
         this(dirPath, false);
@@ -36,8 +36,7 @@ public class FileHelper {
 
         String reportFile = "report-" + dirPath.toFile().getName().replaceAll(" ", "_") + ".html";
         new ReportHelper(
-                possibleDuplicates,
-                duplicates,
+                filesMap,
                 Paths.get(".", "reports", reportFile)
         ).createReport();
 
@@ -47,18 +46,18 @@ public class FileHelper {
         }
     }
 
-
     protected List<File> createPossibleDuplicates() {
         List<File> fileList = getFileOnlyList();
         System.out.printf("Processing [%d] files.%n", fileList.size());
         List<File> possibleDuplicates = new ArrayList<>();
-        noDuplicatesMap = new HashMap<>();
-        fileList.forEach((file) -> {
+        filesMap = new LinkedHashMap<>();
+        fileList.forEach(file -> {
             String fileSize = String.valueOf(file.length());
-            if (noDuplicatesMap.containsKey(fileSize)) {
+            if (filesMap.containsKey(fileSize)) {
+                filesMap.get(fileSize).add(file);
                 possibleDuplicates.add(file);
             } else {
-                noDuplicatesMap.put(fileSize, file);
+                filesMap.put(fileSize, new ArrayList<>(List.of(file)));
             }
         });
         possibleDuplicates.forEach(file -> {
@@ -84,14 +83,16 @@ public class FileHelper {
     protected List<File> createDuplicatesList(List<File> possibleDuplicates) throws NoSuchAlgorithmException, IOException {
         List<File> duplicatesList = new ArrayList<>();
         for (File possibleDuplicate : possibleDuplicates) {
-            File notDuplicate = (File) noDuplicatesMap.get(
+            List<File> fileList = filesMap.get(
                     String.valueOf(possibleDuplicate.length())
             );
-            if (notDuplicate != null) {
+            if (fileList != null && fileList.size() > 1) {
                 String posDupHash = getSHAHashForFile(possibleDuplicate);
-                String notDupHash = getSHAHashForFile(notDuplicate);
-                if (posDupHash.equals(notDupHash)) {
-                    duplicatesList.add(possibleDuplicate);
+                for (File file: fileList) {
+                    String notDupHash = getSHAHashForFile(file);
+                    if (posDupHash.equals(notDupHash)) {
+                        duplicatesList.add(possibleDuplicate);
+                    }
                 }
             }
         }
@@ -113,8 +114,7 @@ public class FileHelper {
         return hexString.toString();
     }
 
-    protected byte[] getByteArrayFromFile(File file) throws FileNotFoundException
-            , IOException {
+    protected byte[] getByteArrayFromFile(File file) throws IOException {
         byte[] byteArray;
         try (FileInputStream fis = new FileInputStream(file)) {
             byteArray = new byte[(int) file.length()];
