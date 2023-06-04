@@ -1,10 +1,13 @@
 package pg.duplicatefileremover.helpers;
 
+import pg.duplicatefileremover.FileExtension;
+
 import java.io.*;
 import java.nio.file.*;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.*;
+import java.util.stream.Collectors;
 
 /**
  * @author Gawa
@@ -13,46 +16,42 @@ public class FileHelper {
 
     private final Path dirPath;
     private final Path destDir;
-    private List<File> possibleDuplicates;
+    private final boolean moveDuplicates;
     private Map<String, File> noDuplicatesMap;
-    private List<File> duplicatesList;
 
     public FileHelper(String dirPath) {
+        this(dirPath, false);
+    }
+
+    public FileHelper(String dirPath, boolean moveDuplicates) {
         this.dirPath = Paths.get(dirPath);
         this.destDir = Paths.get(dirPath, "duplicates");
+        this.moveDuplicates = moveDuplicates;
     }
 
-    protected List<File> getPossibleDuplicates() {
-        return possibleDuplicates;
-    }
-
-    protected Map<String, File> getNoDuplicatesMap() {
-        return noDuplicatesMap;
-    }
-
-    protected List<File> getDuplicatesList() {
-        return duplicatesList;
-    }
 
     public void processDuplicates() throws NoSuchAlgorithmException, IOException {
-        createPossibleDuplicateFileList();
-        possibleDuplicates.forEach(file -> {
-            System.out.printf("Duplicate (?): %s%n", file.getName());
-        });
-        createDuplicatesList();
-        duplicatesList.forEach(file -> {
-            System.out.printf("Duplicate: %s%n", file.getName());
-        });
-        if (!duplicatesList.isEmpty()) {
+        List<File> possibleDuplicates = createPossibleDuplicates();
+        List<File> duplicates = createDuplicatesList(possibleDuplicates);
+
+        String reportFile = "report-" + dirPath.toFile().getName().replaceAll(" ", "_") + ".html";
+        new ReportHelper(
+                possibleDuplicates,
+                duplicates,
+                Paths.get(".", "reports", reportFile)
+        ).createReport();
+
+        if (moveDuplicates && !duplicates.isEmpty()) {
             createDuplicateDirIfNotExists();
-            moveDuplicates();
+            moveDuplicates(duplicates);
         }
     }
 
-    protected void createPossibleDuplicateFileList() {
+
+    protected List<File> createPossibleDuplicates() {
         List<File> fileList = getFileOnlyList();
         System.out.printf("Processing [%d] files.%n", fileList.size());
-        possibleDuplicates = new ArrayList<>();
+        List<File> possibleDuplicates = new ArrayList<>();
         noDuplicatesMap = new HashMap<>();
         fileList.forEach((file) -> {
             String fileSize = String.valueOf(file.length());
@@ -62,19 +61,28 @@ public class FileHelper {
                 noDuplicatesMap.put(fileSize, file);
             }
         });
+        possibleDuplicates.forEach(file -> {
+            System.out.printf("Duplicate (?): %s%n", file.getName());
+        });
+        return possibleDuplicates;
     }
 
     protected List<File> getFileOnlyList() {
         if (dirPath == null || dirPath.toFile().isFile()) {
             return new ArrayList<>();
         }
+        Set<String> allowedExtensions = EnumSet.allOf(FileExtension.class)
+                .stream()
+                .map(fe -> fe.extension)
+                .collect(Collectors.toSet());
         return Arrays.stream(Optional.ofNullable(dirPath.toFile().listFiles()).orElseGet(() -> new File[0]))
                 .filter(File::isFile)
+                .filter(f -> allowedExtensions.contains(f.getName().substring(f.getName().indexOf(".") + 1)))
                 .toList();
     }
 
-    protected void createDuplicatesList() throws NoSuchAlgorithmException, IOException {
-        duplicatesList = new ArrayList<>();
+    protected List<File> createDuplicatesList(List<File> possibleDuplicates) throws NoSuchAlgorithmException, IOException {
+        List<File> duplicatesList = new ArrayList<>();
         for (File possibleDuplicate : possibleDuplicates) {
             File notDuplicate = (File) noDuplicatesMap.get(
                     String.valueOf(possibleDuplicate.length())
@@ -87,6 +95,10 @@ public class FileHelper {
                 }
             }
         }
+        duplicatesList.forEach(file -> {
+            System.out.printf("Duplicate: %s%n", file.getName());
+        });
+        return duplicatesList;
     }
 
     protected String getSHAHashForFile(File file) throws NoSuchAlgorithmException, IOException {
@@ -117,7 +129,7 @@ public class FileHelper {
         }
     }
 
-    protected void moveDuplicates() {
+    protected void moveDuplicates(List<File> duplicatesList) {
         List<File> pomList = new LinkedList<>(duplicatesList);
         for (File file : pomList) {
             try {

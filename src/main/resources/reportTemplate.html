@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Title</title>
+    <style>
+        table, th, td {
+            border: 1px solid;
+        }
+    </style>
+</head>
+<body>
+
+<h2>Duplicates report</h2>
+<table>
+    <thead>
+    <tr>
+        <td>File name</td>
+        <td>File path</td>
+        <td>File size</td>
+    </tr>
+    </thead>
+    <tbody>
+        ${duplicatesContent}
+    </tbody>
+
+</table>
+<h2>Possible duplicates report</h2>
+<table>
+    <thead>
+    <tr>
+        <td>File name</td>
+        <td>File path</td>
+        <td>File size</td>
+    </tr>
+    </thead>
+    <tbody>
+        ${possibleDuplicatesContent}
+    </tbody>
+
+</table>
+</body>
+</html>

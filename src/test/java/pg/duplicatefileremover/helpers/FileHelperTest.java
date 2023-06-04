@@ -2,36 +2,36 @@ package pg.duplicatefileremover.helpers;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import org.mockito.Mockito;
+import pg.duplicatefileremover.TestBase;
 
 import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.*;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Fail.fail;
-import static org.mockito.Mockito.when;
 
 /** @author premik */
-public class FileHelperTest {
+public class FileHelperTest extends TestBase {
 
     private static final String FILE_NOT_FOUND = "FileNotFoundException expected.";
     private FileHelper helper;
 
-    private Path createFile(final String name, final Path tempDir) throws IOException {
-        Path filePath = tempDir.resolve(name);
-        List<String> lines = Arrays.asList("1", "2", "3");
-        Files.write(filePath, lines);
-        return filePath;
-    }
-
     @Test
     public void testFileList(@TempDir Path tempDir) throws IOException {
-        Path resource = createFile("number.txt", tempDir);
+        createFile("number.txt", tempDir);
         helper = new FileHelper(tempDir.toString());
         assertThat(helper.getFileOnlyList()).isNotNull();
         assertThat(helper.getFileOnlyList()).hasSize(1);
+    }
+
+    @Test
+    public void givenNotValidExtension_whenGetFileOnlyList_thenReturnEmptyList(@TempDir Path tempDir) throws IOException {
+        createFile("number.ttf", tempDir);
+        helper = new FileHelper(tempDir.toString());
+        assertThat(helper.getFileOnlyList()).isNotNull();
+        assertThat(helper.getFileOnlyList()).isEmpty();
     }
 
     @Test
@@ -82,31 +82,14 @@ public class FileHelperTest {
     }
 
     @Test
-    public void testCreateDuplicateList() {
-        FileHelper helperF = Mockito.mock(FileHelper.class);
-        when(helperF.getDuplicatesList()).thenReturn(List.of(new File("")));
-        List<File> duplicates = new ArrayList<>(helperF.getDuplicatesList());
-
-        assertThat(helperF.getDuplicatesList()).isNotNull();
-        assertThat(duplicates).isNotEmpty();
-    }
-
-    @Test
     public void testMoveDuplicates(@TempDir Path tempDir) throws Exception {
         helper = new FileHelper(tempDir.toString());
-        helper.createPossibleDuplicateFileList();
-        helper.createDuplicatesList();
-        helper.moveDuplicates();
-        assertThat(helper.getDuplicatesList()).isNotNull();
-        assertThat(helper.getDuplicatesList()).isEmpty();
-    }
+        List<File> duplicatesList = helper.createDuplicatesList(helper.createPossibleDuplicates());
 
-    @Test
-    public void testProcessDuplicates(@TempDir Path tempDir) throws Exception {
-        helper = new FileHelper(tempDir.toString());
-        helper.processDuplicates();
-        assertThat(helper.getDuplicatesList()).isNotNull();
-        assertThat(helper.getDuplicatesList()).isEmpty();
+        helper.moveDuplicates(duplicatesList);
+
+        assertThat(duplicatesList).isNotNull();
+        assertThat(duplicatesList).isEmpty();
     }
 
     @Test

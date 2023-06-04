@@ -6,3 +6,4 @@ build.xml
 /target
 *.iml
 .idea
+/reports
