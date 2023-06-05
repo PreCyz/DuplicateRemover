@@ -25,7 +25,7 @@ public class DuplicateFileRemover {
         this.helper = new FileHelper(srcDirPath);
     }
 
-    public FileHelper getHelper() {
+    FileHelper getHelper() {
         return helper;
     }
 
@@ -72,7 +72,7 @@ public class DuplicateFileRemover {
         try {
             LocalTime start = LocalTime.now();
             DuplicateFileRemover dfr = new DuplicateFileRemover(arg);
-            dfr.getHelper().processDuplicates();
+            dfr.helper.processDuplicates();
             LocalTime stop = LocalTime.now();
             System.out.printf("Finished [%s] - duration: %s Thread [%s].%n",
                     arg,
