@@ -17,7 +17,7 @@ public class FileHelper {
     private final Path dirPath;
     private final Path destDir;
     private final boolean moveDuplicates;
-    private Map<String, List<File>> filesMap;
+    private Map<Long, DuplicateDTO> filesMap;
 
     public FileHelper(String dirPath) {
         this(dirPath, false);
@@ -52,12 +52,11 @@ public class FileHelper {
         List<File> possibleDuplicates = new ArrayList<>();
         filesMap = new LinkedHashMap<>();
         fileList.forEach(file -> {
-            String fileSize = String.valueOf(file.length());
-            if (filesMap.containsKey(fileSize)) {
-                filesMap.get(fileSize).add(file);
+            if (filesMap.containsKey(file.length())) {
+                filesMap.get(file.length()).sameFiles.add(file);
                 possibleDuplicates.add(file);
             } else {
-                filesMap.put(fileSize, new ArrayList<>(List.of(file)));
+                filesMap.put(file.length(), new DuplicateDTO(file.length() , new ArrayList<>(List.of(file))));
             }
         });
         possibleDuplicates.forEach(file -> {
@@ -83,14 +82,13 @@ public class FileHelper {
     protected List<File> createDuplicatesList(List<File> possibleDuplicates) throws NoSuchAlgorithmException, IOException {
         List<File> duplicatesList = new ArrayList<>();
         for (File possibleDuplicate : possibleDuplicates) {
-            List<File> fileList = filesMap.get(
-                    String.valueOf(possibleDuplicate.length())
-            );
-            if (fileList != null && fileList.size() > 1) {
+            DuplicateDTO duplicateDto = filesMap.get(possibleDuplicate.length());
+            if (duplicateDto.sameFiles != null && duplicateDto.sameFiles.size() > 1) {
                 String posDupHash = getSHAHashForFile(possibleDuplicate);
-                for (File file: fileList) {
+                for (File file: duplicateDto.sameFiles) {
                     String notDupHash = getSHAHashForFile(file);
                     if (posDupHash.equals(notDupHash)) {
+                        duplicateDto.fileHash = notDupHash;
                         duplicatesList.add(possibleDuplicate);
                     }
                 }

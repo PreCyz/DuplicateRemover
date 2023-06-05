@@ -1,24 +1,26 @@
 package pg.duplicatefileremover.helpers;
 
-import java.io.*;
+import java.io.FileWriter;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
 import java.util.stream.Collectors;
 
 public class ReportHelper {
-    private final static Path REPORT_TEMPLATE = Paths.get(".", "src", "main", "resources", "reportTemplate.html");
-    private final static Path DEFAULT_REPORT_PATH = Paths.get(".", "report.html");
+    private static final Path REPORT_TEMPLATE = Paths.get(".", "src", "main", "resources", "reportTemplate.html");
+    private static final Path DEFAULT_REPORT_PATH = Paths.get(".", "report.html");
+    private static final String LINE_TEMPLATE_VALUE = "${duplicatesContent}";
 
-    private final Map<String, List<File>> duplicatesMap;
+    private final Map<Long, DuplicateDTO> duplicatesMap;
     private final Path reportPath;
 
-    public ReportHelper(Map<String, List<File>> duplicatesMap, Path reportPath) {
+    public ReportHelper(Map<Long, DuplicateDTO> duplicatesMap, Path reportPath) {
         this.duplicatesMap = new LinkedHashMap<>(duplicatesMap);
         this.reportPath = reportPath;
     }
 
-    public ReportHelper(Map<String, List<File>> duplicatesMap) {
+    public ReportHelper(Map<Long, DuplicateDTO> duplicatesMap) {
         this(duplicatesMap, DEFAULT_REPORT_PATH);
     }
 
@@ -28,8 +30,8 @@ public class ReportHelper {
         ) {
             while (scanner.hasNextLine()) {
                 String nextLine = scanner.nextLine();
-                if ("${duplicatesContent}".equals(nextLine.trim())) {
-                    writeToFile(duplicatesMap, fileWriter);
+                if (nextLine.contains(LINE_TEMPLATE_VALUE)) {
+                    writeToFile(duplicatesMap, fileWriter, nextLine);
                 } else {
                     fileWriter.write(nextLine);
                     fileWriter.flush();
@@ -38,7 +40,7 @@ public class ReportHelper {
         } catch (IOException ex) {
             System.err.printf("Can't read the [%s]%n", REPORT_TEMPLATE);
         } finally {
-            if (duplicatesMap.values().stream().noneMatch(l -> l.size() > 1)) {
+            if (duplicatesMap.values().stream().noneMatch(dto -> dto.sameFiles.size() > 1)) {
                 try {
                     Files.deleteIfExists(reportPath);
                 } catch (IOException e) {
@@ -51,24 +53,27 @@ public class ReportHelper {
 
     }
 
-    private void writeToFile(Map<String, List<File>> duplicatesMap, FileWriter fileWriter) throws IOException {
+    private void writeToFile(Map<Long, DuplicateDTO> duplicatesMap, FileWriter fileWriter, String lineTemplate) throws IOException {
         if (duplicatesMap != null && !duplicatesMap.isEmpty()) {
-            for (Map.Entry<String, List<File>> entry : duplicatesMap.entrySet()) {
-                if (entry.getValue().size() > 1) {
-                    fileWriter.write(createTableContent(entry.getKey(), entry.getValue()));
+            for (Map.Entry<Long, DuplicateDTO> entry : duplicatesMap.entrySet()) {
+                if (entry.getValue().sameFiles.size() > 1) {
+                    fileWriter.write(createTableContent(entry.getValue(), lineTemplate));
                 }
             }
             fileWriter.flush();
         }
     }
 
-    private String createTableContent(String size, List<File> files) {
+    private String createTableContent(DuplicateDTO duplicateDto, String lineTemplate) {
         return "<tr>" +
-                "<td>" + size + "</td>" +
-                "<td>" + files.stream()
-                        .map(f -> f.toPath().toAbsolutePath().toString())
-                        .collect(Collectors.joining("<br/>")) + "</td>" +
+                "<td>" + lineTemplate.replace(LINE_TEMPLATE_VALUE, String.valueOf(duplicateDto.size)) + "</td>" +
+                "<td>" + lineTemplate.replace(LINE_TEMPLATE_VALUE, duplicateDto.fileHash) + "</td>" +
+                "<td>" + lineTemplate.replace(
+                        LINE_TEMPLATE_VALUE,
+                        duplicateDto.sameFiles.stream()
+                                .map(f -> f.toPath().toAbsolutePath().toString())
+                                .collect(Collectors.joining("<br/>"))
+                ) + "</td>" +
                 "</tr>";
-
     }
 }
