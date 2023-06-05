@@ -67,12 +67,12 @@ public class ReportHelper {
         return "<tr>" +
                 "<td>" + lineTemplate.replace(LINE_TEMPLATE_VALUE, String.valueOf(duplicateDto.size)) + "</td>" +
                 "<td>" + lineTemplate.replace(LINE_TEMPLATE_VALUE, duplicateDto.fileHash) + "</td>" +
-                "<td>" + lineTemplate.replace(
+                "<td><table><tbody>" + lineTemplate.replace(
                         LINE_TEMPLATE_VALUE,
                         duplicateDto.sameFiles.stream()
-                                .map(f -> f.toPath().toAbsolutePath().toString())
-                                .collect(Collectors.joining("<br/>"))
-                ) + "</td>" +
+                                .map(f -> "<tr><td>" + f.toPath().toAbsolutePath() + "</td></tr>")
+                                .collect(Collectors.joining(""))
+                ) + "</tbody></table></td>" +
                 "</tr>";
     }
 }

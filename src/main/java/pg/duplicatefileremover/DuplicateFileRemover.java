@@ -36,6 +36,7 @@ public class DuplicateFileRemover {
             for (String arg : args) {
                 processPath(arg);
             }
+            System.out.printf("Processing %d folders.%n", runnables.size());
             CompletableFuture.allOf(
                     runnables.stream()
                             .map(it -> CompletableFuture.runAsync(it, executor))
@@ -63,6 +64,7 @@ public class DuplicateFileRemover {
             dirList.forEach(d -> processPath(d.getAbsolutePath()));
         }
         runnables.add(() -> processDir(path));
+        System.out.printf("[%s] added to process. Thread [%s].%n", path, Thread.currentThread().getName());
     }
 
     private static void processDir(String arg) {
