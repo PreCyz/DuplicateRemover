@@ -7,6 +7,7 @@ import java.nio.file.*;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
@@ -17,7 +18,7 @@ public class FileHelper {
     private final Path dirPath;
     private final Path destDir;
     private final boolean moveDuplicates;
-    private Map<Long, DuplicateDTO> filesMap;
+    private static final ConcurrentHashMap<Long, DuplicateDTO> filesMap = new ConcurrentHashMap<>();
 
     public FileHelper(String dirPath) {
         this(dirPath, false);
@@ -29,16 +30,19 @@ public class FileHelper {
         this.moveDuplicates = moveDuplicates;
     }
 
-
     public void processDuplicates() throws NoSuchAlgorithmException, IOException {
         List<File> possibleDuplicates = createPossibleDuplicates();
         List<File> duplicates = createDuplicatesList(possibleDuplicates);
 
+        Map<Long, DuplicateDTO> filteredMap = filesMap.values()
+                .stream()
+                .filter(dto -> dto.processedDir.equals(dirPath))
+                .collect(Collectors.toMap(k -> k.size, v -> v));
         String reportFile = "report-" + dirPath.toFile().getName().replaceAll(" ", "_") + ".html";
-        new ReportHelper(
-                filesMap,
-                Paths.get(".", "reports", reportFile)
-        ).createReport();
+
+        if (!filteredMap.isEmpty()) {
+            new ReportHelper(filteredMap, Paths.get(".", "reports", reportFile)).createReport();
+        }
 
         if (moveDuplicates && !duplicates.isEmpty()) {
             createDuplicateDirIfNotExists();
@@ -48,17 +52,23 @@ public class FileHelper {
 
     protected List<File> createPossibleDuplicates() {
         List<File> fileList = getFileOnlyList();
-        System.out.printf("Processing [%d] files. Thread [%s]%n", fileList.size(), Thread.currentThread().getName());
+        System.out.printf("Processing [%d] files. Thread [%s].%n", fileList.size(), Thread.currentThread().getName());
         List<File> possibleDuplicates = new ArrayList<>();
-        filesMap = new LinkedHashMap<>();
-        fileList.forEach(file -> {
+        for (File file : fileList) {
             if (filesMap.containsKey(file.length())) {
                 filesMap.get(file.length()).sameFiles.add(file);
                 possibleDuplicates.add(file);
             } else {
-                filesMap.put(file.length(), new DuplicateDTO(file.length() , new ArrayList<>(List.of(file))));
+                filesMap.put(
+                        file.length(),
+                        new DuplicateDTO(
+                                file.length(),
+                                new ArrayList<>(List.of(file)),
+                                dirPath
+                        )
+                );
             }
-        });
+        }
         /*possibleDuplicates.forEach(file -> {
             System.out.printf("Duplicate (?): %s%n", file.getName());
         });*/

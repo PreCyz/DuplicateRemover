@@ -20,7 +20,12 @@ class ReportHelperTest extends TestBase {
         Map<Long, DuplicateDTO> duplicatesMap = new LinkedHashMap<>();
         duplicatesMap.put(
                 resource.toFile().length(),
-                new DuplicateDTO(resource.toFile().length(), "hash", List.of(resource.toFile(), resource.toFile()))
+                new DuplicateDTO(
+                        resource.toFile().length(),
+                        List.of(resource.toFile(), resource.toFile()),
+                        "hash",
+                        tempDir
+                )
         );
 
         reportHelper = new ReportHelper(duplicatesMap, tempDir.resolve("report.html"));
