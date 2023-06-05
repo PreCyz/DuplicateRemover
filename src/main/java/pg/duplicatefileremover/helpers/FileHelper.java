@@ -48,7 +48,7 @@ public class FileHelper {
 
     protected List<File> createPossibleDuplicates() {
         List<File> fileList = getFileOnlyList();
-        System.out.printf("Processing [%d] files.%n", fileList.size());
+        System.out.printf("Processing [%d] files. Thread [%s]%n", fileList.size(), Thread.currentThread().getName());
         List<File> possibleDuplicates = new ArrayList<>();
         filesMap = new LinkedHashMap<>();
         fileList.forEach(file -> {
@@ -59,9 +59,9 @@ public class FileHelper {
                 filesMap.put(file.length(), new DuplicateDTO(file.length() , new ArrayList<>(List.of(file))));
             }
         });
-        possibleDuplicates.forEach(file -> {
+        /*possibleDuplicates.forEach(file -> {
             System.out.printf("Duplicate (?): %s%n", file.getName());
-        });
+        });*/
         return possibleDuplicates;
     }
 
@@ -94,14 +94,14 @@ public class FileHelper {
                 }
             }
         }
-        duplicatesList.forEach(file -> {
+        /*duplicatesList.forEach(file -> {
             System.out.printf("Duplicate: %s%n", file.getName());
-        });
+        });*/
         return duplicatesList;
     }
 
     protected String getSHAHashForFile(File file) throws NoSuchAlgorithmException, IOException {
-        MessageDigest md = MessageDigest.getInstance("SHA-512");
+        MessageDigest md = MessageDigest.getInstance("SHA-256");
         byte[] dataBytes = getByteArrayFromFile(file);
         byte[] mdBytes = md.digest(dataBytes);
 

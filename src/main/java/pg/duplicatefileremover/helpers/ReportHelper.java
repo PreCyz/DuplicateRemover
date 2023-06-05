@@ -38,19 +38,18 @@ public class ReportHelper {
                 }
             }
         } catch (IOException ex) {
-            System.err.printf("Can't read the [%s]%n", REPORT_TEMPLATE);
+            System.err.printf("Can't read the [%s].%n", REPORT_TEMPLATE);
         } finally {
             if (duplicatesMap.values().stream().noneMatch(dto -> dto.sameFiles.size() > 1)) {
                 try {
                     Files.deleteIfExists(reportPath);
                 } catch (IOException e) {
-                    System.err.printf("Couldn't remove %s%n", reportPath);
+                    System.err.printf("Couldn't remove [%s].%n", reportPath);
                 }
             } else {
-                System.out.printf("Report generated [%s]%n.", reportPath);
+                System.out.printf("Report generated [%s].%n", reportPath);
             }
         }
-
     }
 
     private void writeToFile(Map<Long, DuplicateDTO> duplicatesMap, FileWriter fileWriter, String lineTemplate) throws IOException {

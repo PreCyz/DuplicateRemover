@@ -9,6 +9,8 @@ import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.LocalTime;
 import java.util.LinkedList;
+import java.util.List;
+import java.util.concurrent.*;
 
 /**
  * @author Gawa
@@ -16,6 +18,8 @@ import java.util.LinkedList;
 public class DuplicateFileRemover {
 
     private final FileHelper helper;
+    private static final Executor executor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
+    private static final List<Runnable> runnables = new LinkedList<>();
 
     public DuplicateFileRemover(String srcDirPath) {
         this.helper = new FileHelper(srcDirPath);
@@ -26,14 +30,22 @@ public class DuplicateFileRemover {
     }
 
     public static void main(String[] args) {
+        LocalTime start = LocalTime.now();
         try {
             validateArgs(args);
             for (String arg : args) {
                 processPath(arg);
-
             }
+            CompletableFuture.allOf(
+                    runnables.stream()
+                            .map(it -> CompletableFuture.runAsync(it, executor))
+                            .toArray(CompletableFuture[]::new)
+            ).join();
         } catch (UnsupportedOperationException ex) {
             System.out.println(ex.getMessage());
+        } finally {
+            System.out.printf("All done - total duration %s.%n", getDurationInfo(start, LocalTime.now()));
+            System.exit(0);
         }
     }
 
@@ -50,25 +62,33 @@ public class DuplicateFileRemover {
         if (!dirList.isEmpty()) {
             dirList.forEach(d -> processPath(d.getAbsolutePath()));
         }
-        processDir(path);
+        runnables.add(() -> processDir(path));
     }
 
     private static void processDir(String arg) {
-        System.out.printf("Processing path [%s]. ", arg);
+        System.out.printf("Processing path [%s] thread [%s].%n", arg, Thread.currentThread().getName());
         try {
             LocalTime start = LocalTime.now();
             DuplicateFileRemover dfr = new DuplicateFileRemover(arg);
             dfr.getHelper().processDuplicates();
             LocalTime stop = LocalTime.now();
-            System.out.printf("Finished - duration: %s%n", dfr.getDurationInfo(start, stop));
+            System.out.printf("Finished [%s] - duration: %s Thread [%s].%n",
+                    arg,
+                    getDurationInfo(start, stop),
+                    Thread.currentThread().getName()
+            );
         } catch (NoSuchAlgorithmException | IOException ex) {
-            System.err.printf("Path [%s] finished with error %s%n", arg, ex.getMessage());
+            System.err.printf("Thread [%s], Path [%s] finished with error %s%n",
+                    Thread.currentThread().getName(),
+                    arg,
+                    ex.getMessage()
+            );
         }
     }
 
-    public String getDurationInfo(LocalTime begin, LocalTime end) {
+    public static String getDurationInfo(LocalTime begin, LocalTime end) {
         Duration duration = Duration.between(begin, end);
-        return String.format("%d[h]:%d[m]:%d[s]:%d[milli].",
+        return String.format("%d[h]:%d[m]:%d[s]:%d[milli]",
                 duration.toHoursPart(),
                 duration.toMinutesPart(),
                 duration.toSecondsPart(),
