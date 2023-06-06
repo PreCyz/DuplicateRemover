@@ -42,6 +42,9 @@ public class DuplicateFileRemover {
                             .map(it -> CompletableFuture.runAsync(it, executor))
                             .toArray(CompletableFuture[]::new)
             ).join();
+
+            System.out.printf("%d sizes processed.%n", runnables.size());
+            System.out.printf("Unique extensions [%s].%n", String.join(",", FileHelper.extensions));
         } catch (UnsupportedOperationException ex) {
             System.out.println(ex.getMessage());
         } finally {

@@ -19,6 +19,7 @@ public class FileHelper {
     private final Path destDir;
     private final boolean moveDuplicates;
     private static final ConcurrentHashMap<Long, DuplicateDTO> filesMap = new ConcurrentHashMap<>();
+    public static final Set<String> extensions = new HashSet<>();
 
     public FileHelper(String dirPath) {
         this(dirPath, false);
@@ -55,6 +56,7 @@ public class FileHelper {
         System.out.printf("Processing [%d] files. Thread [%s].%n", fileList.size(), Thread.currentThread().getName());
         List<File> possibleDuplicates = new ArrayList<>();
         for (File file : fileList) {
+            extensions.add(file.getName().substring(file.getName().indexOf(".") + 1));
             if (filesMap.containsKey(file.length())) {
                 filesMap.get(file.length()).sameFiles.add(file);
                 possibleDuplicates.add(file);
@@ -69,9 +71,6 @@ public class FileHelper {
                 );
             }
         }
-        /*possibleDuplicates.forEach(file -> {
-            System.out.printf("Duplicate (?): %s%n", file.getName());
-        });*/
         return possibleDuplicates;
     }
 
