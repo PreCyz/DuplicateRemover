@@ -32,6 +32,7 @@ public class ReportHelper {
         }
 
         String report = template
+                .replace("${bootstrapCssUrl}", escapeHtml(links.bootstrapCssUrl()))
                 .replace("${scannedFiles}", Long.toString(scanResult.scannedFiles()))
                 .replace("${duplicateCount}", Long.toString(scanResult.duplicateCount()))
                 .replace("${duplicateBytesRaw}", Long.toString(scanResult.duplicateBytes()))
@@ -165,6 +166,8 @@ public class ReportHelper {
     }
 
     public interface ReportLinks {
+        String bootstrapCssUrl();
+
         String mediaUrl(Path path);
 
         String duplicateId(Path path);

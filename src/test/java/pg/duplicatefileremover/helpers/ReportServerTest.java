@@ -9,12 +9,30 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 class ReportServerTest {
+
+    @Test
+    void servesPackagedBootstrapStylesheet(@TempDir Path tempDir) throws Exception {
+        ScanResult result = new ScanResult(0, List.of(), Duration.ZERO);
+        Path report = Files.writeString(tempDir.resolve("report.html"), "<html>report</html>");
+
+        try (ReportServer server = new ReportServer(result, report);
+             HttpClient client = HttpClient.newHttpClient()) {
+            server.start();
+            HttpResponse<String> response = client.send(
+                    HttpRequest.newBuilder(URI.create(server.bootstrapCssUrl())).GET().build(),
+                    HttpResponse.BodyHandlers.ofString()
+            );
+
+            assertThat(response.statusCode()).isEqualTo(200);
+            assertThat(response.headers().firstValue("Content-Type").orElseThrow()).contains("text/css");
+            assertThat(response.body()).contains("Bootstrap  v5.3.8");
+        }
+    }
 
     @Test
     void removesRegisteredDuplicateAndPreservesOrigin(@TempDir Path tempDir) throws Exception {
@@ -138,6 +156,53 @@ class ReportServerTest {
 
             assertThat(postSession(client, server, "heartbeat", "abandoned-session").statusCode()).isEqualTo(204);
             server.browserSessionsEnded().toCompletableFuture().get(2, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void waitsForActiveDeletionBeforeSignallingBrowserShutdown(@TempDir Path tempDir) throws Exception {
+        Path original = Files.writeString(tempDir.resolve("origin.jpg"), "same-content");
+        Path duplicate = Files.writeString(tempDir.resolve("duplicate.jpg"), "same-content");
+        String hash = FileHelper.getSHAHashForFile(original);
+        ScanResult result = new ScanResult(
+                2,
+                List.of(new DuplicateGroup(hash, Files.size(original), original, List.of(duplicate))),
+                Duration.ZERO
+        );
+        Path report = Files.writeString(tempDir.resolve("report.html"), "<html>report</html>");
+        CountDownLatch deletionStarted = new CountDownLatch(1);
+        CountDownLatch allowDeletion = new CountDownLatch(1);
+
+        try (ReportServer server = new ReportServer(result, report, Duration.ofMillis(100), ignored -> {
+            deletionStarted.countDown();
+            try {
+                allowDeletion.await();
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+            }
+        }); HttpClient client = HttpClient.newHttpClient()) {
+            server.start();
+            assertThat(postSession(client, server, "heartbeat", "slow-deletion-session").statusCode()).isEqualTo(204);
+            CompletableFuture<Void> browserExit = server.browserSessionsEnded().toCompletableFuture();
+            URI deleteUri = URI.create(server.apiBase() + "/api/duplicates/" + server.duplicateId(duplicate)
+                    + "?token=" + server.apiToken());
+            CompletableFuture<HttpResponse<Void>> deleteResponse = client.sendAsync(
+                    HttpRequest.newBuilder(deleteUri).DELETE().build(),
+                    HttpResponse.BodyHandlers.discarding()
+            );
+
+            try {
+                assertThat(deletionStarted.await(2, TimeUnit.SECONDS)).isTrue();
+                assertThat(postSession(client, server, "close", "slow-deletion-session").statusCode()).isEqualTo(204);
+                Thread.sleep(300);
+                assertThat(browserExit.isDone()).isFalse();
+            } finally {
+                allowDeletion.countDown();
+            }
+
+            assertThat(deleteResponse.get(2, TimeUnit.SECONDS).statusCode()).isEqualTo(204);
+            assertThat(duplicate).doesNotExist();
+            browserExit.get(2, TimeUnit.SECONDS);
         }
     }
 

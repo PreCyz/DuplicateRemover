@@ -28,7 +28,8 @@ class ReportHelperTest {
 
         assertThat(report).exists();
         assertThat(Files.readString(report))
-                .contains("bootstrap@5.3.8")
+                .contains("href=\"http://127.0.0.1:12345/assets/bootstrap.min.css?token=test-token\"")
+                .doesNotContain("cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css")
                 .contains("Remove All Duplicates")
                 .contains(">Remove</button>")
                 .contains("id=\"remove-progress-section\"")
@@ -81,6 +82,11 @@ class ReportHelperTest {
     }
 
     private record TestLinks(Path duplicate) implements ReportHelper.ReportLinks {
+        @Override
+        public String bootstrapCssUrl() {
+            return apiBase() + "/assets/bootstrap.min.css?token=" + apiToken();
+        }
+
         @Override
         public String mediaUrl(Path path) {
             return apiBase() + "/media/" + (path.equals(duplicate) ? "d0" : "m0") + "?token=" + apiToken();

@@ -9,7 +9,7 @@ The generated Bootstrap report shows the original file, every duplicate path, me
 - JDK 25
 - Maven Daemon (`mvnd`) with Apache Maven 3.9 or newer; `mvn` is supported as a fallback
 - A modern browser
-- Internet access when opening the report if you want the Bootstrap assets loaded from the jsDelivr CDN
+- Internet access is optional for report styling because Bootstrap CSS is packaged in the application; Bootstrap's JavaScript enhancements are loaded from jsDelivr when available
 
 ## Build
 
