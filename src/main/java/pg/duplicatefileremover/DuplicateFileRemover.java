@@ -32,7 +32,11 @@ public class DuplicateFileRemover {
         try {
             validateArgs(args);
             List<Path> roots = Arrays.stream(args).map(Path::of).toList();
-            ScanResult result = new FileHelper(roots).scan();
+            ScanProgress progress = new ScanProgress();
+            ScanResult result;
+            try (TerminalProgressBar progressBar = new TerminalProgressBar(progress)) {
+                result = new FileHelper(roots, progress).scan();
+            }
 
             try (ReportServer server = new ReportServer(result, REPORT_PATH)) {
                 Path report = new ReportHelper(result, REPORT_PATH, server).createReport();
