@@ -1,7 +1,21 @@
 @echo off
+setlocal
 
-echo Start ChangeFileName
+if "%~1"=="" (
+    echo Usage: run.bat "C:\path\to\media" ["D:\another\path"]
+    exit /b 1
+)
 
-java -jar .\dist\DuplicateFileRemover.jar d:\\foty\\xperiaM2\\
+if not exist ".\target\DuplicateFileRemover-1.0-SNAPSHOT.jar" (
+    where mvnd >nul 2>&1
+    if errorlevel 1 (
+        echo mvnd is not available; falling back to mvn.
+        call mvn package
+    ) else (
+        call mvnd package
+    )
 
-pause
+    if errorlevel 1 exit /b 1
+)
+
+java -jar ".\target\DuplicateFileRemover-1.0-SNAPSHOT.jar" %*

@@ -7,3 +7,8 @@ build.xml
 *.iml
 .idea
 /reports
+.codegraph/
+.agents/
+.codex/
+.tmp/
+.github/

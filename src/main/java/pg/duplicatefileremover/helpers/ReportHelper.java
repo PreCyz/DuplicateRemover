@@ -1,78 +1,162 @@
 package pg.duplicatefileremover.helpers;
 
-import java.io.FileWriter;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.*;
-import java.util.*;
-import java.util.stream.Collectors;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.Locale;
 
 public class ReportHelper {
-    private static final Path REPORT_TEMPLATE = Paths.get(".", "src", "main", "resources", "reportTemplate.html");
-    private static final Path DEFAULT_REPORT_PATH = Paths.get(".", "report.html");
-    private static final String LINE_TEMPLATE_VALUE = "${duplicatesContent}";
+    private static final String TEMPLATE_RESOURCE = "/reportTemplate.html";
 
-    private final Map<Long, DuplicateDTO> duplicatesMap;
+    private final ScanResult scanResult;
     private final Path reportPath;
+    private final ReportLinks links;
 
-    public ReportHelper(Map<Long, DuplicateDTO> duplicatesMap, Path reportPath) {
-        this.duplicatesMap = new LinkedHashMap<>(duplicatesMap);
-        this.reportPath = reportPath;
+    public ReportHelper(ScanResult scanResult, Path reportPath, ReportLinks links) {
+        this.scanResult = scanResult;
+        this.reportPath = reportPath.toAbsolutePath().normalize();
+        this.links = links;
     }
 
-    public ReportHelper(Map<Long, DuplicateDTO> duplicatesMap) {
-        this(duplicatesMap, DEFAULT_REPORT_PATH);
-    }
-
-    public void createReport() {
-        try (Scanner scanner = new Scanner(REPORT_TEMPLATE.toAbsolutePath(), StandardCharsets.UTF_8);
-             FileWriter fileWriter = new FileWriter(reportPath.toFile(), StandardCharsets.UTF_8)
-        ) {
-            while (scanner.hasNextLine()) {
-                String nextLine = scanner.nextLine();
-                if (nextLine.contains(LINE_TEMPLATE_VALUE)) {
-                    writeToFile(duplicatesMap, fileWriter, nextLine);
-                } else {
-                    fileWriter.write(nextLine);
-                    fileWriter.flush();
-                }
+    public Path createReport() throws IOException {
+        String template;
+        try (InputStream input = ReportHelper.class.getResourceAsStream(TEMPLATE_RESOURCE)) {
+            if (input == null) {
+                throw new IOException("Missing report template: " + TEMPLATE_RESOURCE);
             }
-        } catch (IOException ex) {
-            System.err.printf("Can't read the [%s].%n", REPORT_TEMPLATE);
-        } finally {
-            if (duplicatesMap.values().stream().noneMatch(dto -> dto.sameFiles.size() > 1)) {
-                try {
-                    Files.deleteIfExists(reportPath);
-                } catch (IOException e) {
-                    System.err.printf("Couldn't remove [%s].%n", reportPath);
-                }
-            } else {
-                System.out.printf("Report generated [%s].%n", reportPath);
-            }
+            template = new String(input.readAllBytes(), StandardCharsets.UTF_8);
         }
-    }
 
-    private void writeToFile(Map<Long, DuplicateDTO> duplicatesMap, FileWriter fileWriter, String lineTemplate) throws IOException {
-        if (duplicatesMap != null && !duplicatesMap.isEmpty()) {
-            for (Map.Entry<Long, DuplicateDTO> entry : duplicatesMap.entrySet()) {
-                if (entry.getValue().sameFiles.size() > 1) {
-                    fileWriter.write(createTableContent(entry.getValue(), lineTemplate));
-                }
-            }
-            fileWriter.flush();
+        String report = template
+                .replace("${scannedFiles}", Long.toString(scanResult.scannedFiles()))
+                .replace("${duplicateCount}", Long.toString(scanResult.duplicateCount()))
+                .replace("${duplicateBytesRaw}", Long.toString(scanResult.duplicateBytes()))
+                .replace("${duplicateBytes}", escapeHtml(formatBytes(scanResult.duplicateBytes())))
+                .replace("${scanDuration}", escapeHtml(formatDuration(scanResult.duration())))
+                .replace("${duplicatesContent}", createTableContent())
+                .replace("${apiBase}", escapeJavaScript(links.apiBase()))
+                .replace("${apiToken}", escapeJavaScript(links.apiToken()));
+
+        Path parent = reportPath.getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
         }
+        Files.writeString(reportPath, report, StandardCharsets.UTF_8);
+        return reportPath;
     }
 
-    private String createTableContent(DuplicateDTO duplicateDto, String lineTemplate) {
-        return "<tr>" +
-                "<td>" + lineTemplate.replace(LINE_TEMPLATE_VALUE, String.valueOf(duplicateDto.size)) + "</td>" +
-                "<td>" + lineTemplate.replace(LINE_TEMPLATE_VALUE, duplicateDto.fileHash) + "</td>" +
-                "<td><table><tbody>" + lineTemplate.replace(
-                        LINE_TEMPLATE_VALUE,
-                        duplicateDto.sameFiles.stream()
-                                .map(f -> "<tr><td>" + f.toPath().toAbsolutePath() + "</td></tr>")
-                                .collect(Collectors.joining(""))
-                ) + "</tbody></table></td>" +
-                "</tr>";
+    private String createTableContent() {
+        if (scanResult.duplicateGroups().isEmpty()) {
+            return "<tr id=\"empty-result\"><td colspan=\"4\" class=\"text-center py-5 text-secondary\">No duplicate media files found.</td></tr>";
+        }
+
+        StringBuilder content = new StringBuilder();
+        int groupNumber = 1;
+        for (DuplicateGroup group : scanResult.duplicateGroups()) {
+            content.append("<tr class=\"duplicate-group\" data-group=\"")
+                    .append(groupNumber)
+                    .append("\"><td class=\"align-middle\"><span class=\"badge text-bg-secondary\">#")
+                    .append(groupNumber)
+                    .append("</span></td><td>")
+                    .append(createMediaCard(group.original(), null, group.fileSize(), true))
+                    .append("</td><td><div class=\"vstack gap-3\">");
+            for (Path duplicate : group.duplicates()) {
+                content.append(createMediaCard(duplicate, links.duplicateId(duplicate), group.fileSize(), false));
+            }
+            content.append("</div></td><td class=\"align-middle text-nowrap\"><div>")
+                    .append(escapeHtml(formatBytes(group.fileSize())))
+                    .append(" each</div><code class=\"small text-break\">")
+                    .append(escapeHtml(group.hash()))
+                    .append("</code></td></tr>");
+            groupNumber++;
+        }
+        return content.toString();
+    }
+
+    private String createMediaCard(Path path, String duplicateId, long fileSize, boolean original) {
+        String absolutePath = path.toAbsolutePath().normalize().toString();
+        String mediaUrl = escapeHtml(links.mediaUrl(path));
+        StringBuilder card = new StringBuilder("<div class=\"media-card ")
+                .append(original ? "original-card" : "duplicate-card")
+                .append("\"");
+        if (duplicateId != null) {
+            card.append(" data-duplicate-id=\"").append(escapeHtml(duplicateId))
+                    .append("\" data-bytes=\"").append(fileSize).append("\"");
+        }
+        card.append("><div class=\"media-preview\">");
+        if (isVideo(path)) {
+            card.append("<video src=\"").append(mediaUrl)
+                    .append("\" preload=\"metadata\" muted controls aria-label=\"Preview of ")
+                    .append(escapeHtml(absolutePath)).append("\"></video>");
+        } else {
+            card.append("<img src=\"").append(mediaUrl).append("\" loading=\"lazy\" alt=\"Thumbnail of ")
+                    .append(escapeHtml(absolutePath)).append("\">");
+        }
+        card.append("</div><div class=\"flex-grow-1 min-width-0\"><div class=\"fw-semibold mb-1\">")
+                .append(original ? "Original" : "Duplicate")
+                .append("</div><div class=\"path-text\" title=\"")
+                .append(escapeHtml(absolutePath)).append("\">")
+                .append(escapeHtml(absolutePath)).append("</div></div>");
+        if (duplicateId != null) {
+            card.append("<button type=\"button\" class=\"btn btn-primary btn-sm remove-duplicate\" data-id=\"")
+                    .append(escapeHtml(duplicateId)).append("\">Remove</button>");
+        }
+        return card.append("</div>").toString();
+    }
+
+    public static String formatBytes(long bytes) {
+        if (bytes < 1024) {
+            return bytes + " B";
+        }
+        String[] units = {"KiB", "MiB", "GiB", "TiB"};
+        double value = bytes;
+        int unit = -1;
+        do {
+            value /= 1024.0;
+            unit++;
+        } while (value >= 1024 && unit < units.length - 1);
+        return String.format(Locale.ROOT, "%.2f %s", value, units[unit]);
+    }
+
+    static String formatDuration(Duration duration) {
+        long hours = duration.toHours();
+        long minutes = duration.toMinutesPart();
+        long seconds = duration.toSecondsPart();
+        long millis = duration.toMillisPart();
+        return String.format(Locale.ROOT, "%02dh %02dm %02ds %03dms", hours, minutes, seconds, millis);
+    }
+
+    private static boolean isVideo(Path path) {
+        String name = path.getFileName().toString().toLowerCase(Locale.ROOT);
+        return name.endsWith(".mp4") || name.endsWith(".mov") || name.endsWith(".3gp") || name.endsWith(".m4v");
+    }
+
+    private static String escapeHtml(String value) {
+        return value.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;")
+                .replace("'", "&#39;");
+    }
+
+    private static String escapeJavaScript(String value) {
+        return value.replace("\\", "\\\\")
+                .replace("'", "\\'")
+                .replace("\r", "\\r")
+                .replace("\n", "\\n")
+                .replace("</", "<\\/");
+    }
+
+    public interface ReportLinks {
+        String mediaUrl(Path path);
+
+        String duplicateId(Path path);
+
+        String apiBase();
+
+        String apiToken();
     }
 }

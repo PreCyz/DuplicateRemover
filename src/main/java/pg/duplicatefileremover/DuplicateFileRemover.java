@@ -1,28 +1,27 @@
 package pg.duplicatefileremover;
 
-import pg.duplicatefileremover.helpers.FileHelper;
+import pg.duplicatefileremover.helpers.*;
 
-import java.io.File;
-import java.io.IOException;
-import java.nio.file.Paths;
+import java.awt.*;
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.LocalTime;
-import java.util.LinkedList;
+import java.util.Arrays;
 import java.util.List;
-import java.util.concurrent.*;
 
-/**
- * @author Gawa
- */
 public class DuplicateFileRemover {
+    private static final Path REPORT_PATH = Path.of(System.getProperty(
+            "duplicate.report.path",
+            Path.of("reports", "duplicates-report.html").toString()
+    ));
 
     private final FileHelper helper;
-    private static final Executor executor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
-    private static final List<Runnable> runnables = new LinkedList<>();
 
-    public DuplicateFileRemover(String srcDirPath) {
-        this.helper = new FileHelper(srcDirPath);
+    public DuplicateFileRemover(String sourceDirectory) {
+        this.helper = new FileHelper(sourceDirectory);
     }
 
     FileHelper getHelper() {
@@ -30,64 +29,25 @@ public class DuplicateFileRemover {
     }
 
     public static void main(String[] args) {
-        LocalTime start = LocalTime.now();
         try {
             validateArgs(args);
-            for (String arg : args) {
-                processPath(arg);
+            List<Path> roots = Arrays.stream(args).map(Path::of).toList();
+            ScanResult result = new FileHelper(roots).scan();
+
+            try (ReportServer server = new ReportServer(result, REPORT_PATH)) {
+                Path report = new ReportHelper(result, REPORT_PATH, server).createReport();
+                server.start();
+                System.out.printf("Scanned %d media files and found %d duplicates (%s).%n",
+                        result.scannedFiles(),
+                        result.duplicateCount(),
+                        ReportHelper.formatBytes(result.duplicateBytes()));
+                System.out.printf("Report written to [%s].%n", report);
+                System.out.printf("Open [%s] to review or remove duplicates.%n", server.reportUri());
+                openBrowser(server);
+                waitForExit();
             }
-            System.out.printf("Processing %d folders.%n", runnables.size());
-            CompletableFuture.allOf(
-                    runnables.stream()
-                            .map(it -> CompletableFuture.runAsync(it, executor))
-                            .toArray(CompletableFuture[]::new)
-            ).join();
-
-            System.out.printf("%d sizes processed.%n", runnables.size());
-            System.out.printf("Unique extensions [%s].%n", String.join(",", FileHelper.extensions));
-        } catch (UnsupportedOperationException ex) {
-            System.out.println(ex.getMessage());
-        } finally {
-            System.out.printf("All done - total duration %s.%n", getDurationInfo(start, LocalTime.now()));
-            System.exit(0);
-        }
-    }
-
-    private static void processPath(String path) {
-        File[] files = Paths.get(path).toFile().listFiles();
-        if (files == null) return;
-
-        LinkedList<File> dirList = new LinkedList<>();
-        for (File dir : files) {
-            if (dir.isDirectory()) {
-                dirList.add(dir);
-            }
-        }
-        if (!dirList.isEmpty()) {
-            dirList.forEach(d -> processPath(d.getAbsolutePath()));
-        }
-        runnables.add(() -> processDir(path));
-        System.out.printf("[%s] added to process. Thread [%s].%n", path, Thread.currentThread().getName());
-    }
-
-    private static void processDir(String arg) {
-        System.out.printf("Processing path [%s] thread [%s].%n", arg, Thread.currentThread().getName());
-        try {
-            LocalTime start = LocalTime.now();
-            DuplicateFileRemover dfr = new DuplicateFileRemover(arg);
-            dfr.helper.processDuplicates();
-            LocalTime stop = LocalTime.now();
-            System.out.printf("Finished [%s] - duration: %s Thread [%s].%n",
-                    arg,
-                    getDurationInfo(start, stop),
-                    Thread.currentThread().getName()
-            );
-        } catch (NoSuchAlgorithmException | IOException ex) {
-            System.err.printf("Thread [%s], Path [%s] finished with error %s%n",
-                    Thread.currentThread().getName(),
-                    arg,
-                    ex.getMessage()
-            );
+        } catch (IllegalArgumentException | UnsupportedOperationException | IOException | NoSuchAlgorithmException exception) {
+            System.err.println("Duplicate scan failed: " + exception.getMessage());
         }
     }
 
@@ -105,8 +65,26 @@ public class DuplicateFileRemover {
         if (args == null || args.length == 0) {
             throw new UnsupportedOperationException("Path to folder not specified.");
         }
-        if (args[0] == null || "".equals(args[0].trim())) {
-            throw new IllegalArgumentException("Illegal argument.");
+        for (String argument : args) {
+            if (argument == null || argument.isBlank()) {
+                throw new IllegalArgumentException("Illegal argument.");
+            }
         }
+    }
+
+    private static void openBrowser(ReportServer server) {
+        if (!Desktop.isDesktopSupported() || !Desktop.getDesktop().isSupported(Desktop.Action.BROWSE)) {
+            return;
+        }
+        try {
+            Desktop.getDesktop().browse(server.reportUri());
+        } catch (IOException | UnsupportedOperationException exception) {
+            System.err.println("Could not open the browser automatically: " + exception.getMessage());
+        }
+    }
+
+    private static void waitForExit() throws IOException {
+        IO.println("Keep this window open while using Remove buttons. Press Enter to stop the report server.");
+        new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8)).readLine();
     }
 }

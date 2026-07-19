@@ -4,100 +4,87 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import pg.duplicatefileremover.TestBase;
 
-import java.io.*;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.List;
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.*;
+import java.nio.file.attribute.BasicFileAttributeView;
+import java.nio.file.attribute.FileTime;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Fail.fail;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-/** @author premik */
-public class FileHelperTest extends TestBase {
-
-    private static final String FILE_NOT_FOUND = "FileNotFoundException expected.";
-    private FileHelper helper;
+class FileHelperTest extends TestBase {
 
     @Test
-    public void testFileList(@TempDir Path tempDir) throws IOException {
-        createFile("number.txt", tempDir);
-        helper = new FileHelper(tempDir.toString());
-        assertThat(helper.getFileOnlyList()).isNotNull();
-        assertThat(helper.getFileOnlyList()).hasSize(1);
+    void listsOnlySupportedMediaFiles(@TempDir Path tempDir) throws IOException {
+        createFile("image.JPG", tempDir);
+        createFile("notes.txt", tempDir);
+
+        assertThat(new FileHelper(tempDir.toString()).getFileOnlyList())
+                .extracting(File::getName)
+                .containsExactly("image.JPG");
     }
 
     @Test
-    public void givenNotValidExtension_whenGetFileOnlyList_thenReturnEmptyList(@TempDir Path tempDir) throws IOException {
-        createFile("number.ttf", tempDir);
-        helper = new FileHelper(tempDir.toString());
-        assertThat(helper.getFileOnlyList()).isNotNull();
-        assertThat(helper.getFileOnlyList()).isEmpty();
+    void hashesEqualContentEqually(@TempDir Path tempDir) throws Exception {
+        Path first = createFile("first.jpg", tempDir);
+        Path second = createFile("second.jpg", tempDir);
+        FileHelper helper = new FileHelper(tempDir.toString());
+
+        assertThat(helper.getSHAHashForFile(first.toFile()))
+                .isNotEmpty()
+                .isEqualTo(helper.getSHAHashForFile(second.toFile()));
     }
 
     @Test
-    public void testHashForFile(@TempDir Path tempDir) throws Exception {
-        helper = new FileHelper(tempDir.toString());
-        try {
-            helper.getSHAHashForFile(new File(""));
-            fail(FILE_NOT_FOUND);
-        } catch (FileNotFoundException ex) {
-            assertThat(ex).isNotNull();
-        }
+    void rejectsMissingFileWhenHashing(@TempDir Path tempDir) {
+        FileHelper helper = new FileHelper(tempDir.toString());
+
+        assertThatThrownBy(() -> helper.getSHAHashForFile(tempDir.resolve("missing.jpg").toFile()))
+                .isInstanceOf(NoSuchFileException.class);
     }
 
     @Test
-    void givenSameFile_whenGetSHAHashForFile_thenReturnSameHash(@TempDir Path tempDir) throws Exception {
-        Path resource = createFile("number.txt", tempDir);
-        helper = new FileHelper(tempDir.toString());
-        String fileHash = helper.getSHAHashForFile(resource.toFile());
-        String secondFileHash = helper.getSHAHashForFile(resource.toFile());
+    void readsCompleteFile(@TempDir Path tempDir) throws Exception {
+        Path resource = createFile("number.png", tempDir);
+        FileHelper helper = new FileHelper(tempDir.toString());
 
-        assertThat(fileHash).isNotNull();
-        assertThat(fileHash).isNotEmpty();
-        assertThat(fileHash).isEqualToIgnoringCase(secondFileHash);
+        assertThat(helper.getByteArrayFromFile(resource.toFile())).containsExactly(Files.readAllBytes(resource));
     }
 
     @Test
-    public void testGetByteArrayFromFile(@TempDir Path tempDir) throws Exception {
-        Path resource = createFile("number.txt", tempDir);
-        helper = new FileHelper(tempDir.toString());
+    void scanSeparatesEqualSizedDifferentContentAndSelectsOneOrigin(@TempDir Path tempDir) throws Exception {
+        Path original = tempDir.resolve("z-original.jpg");
+        Path nested = Files.createDirectories(tempDir.resolve("nested"));
+        Path duplicate = nested.resolve("a-copy.JPG");
+        Files.writeString(original, "same");
+        Files.writeString(duplicate, "same");
+        Files.getFileAttributeView(original, BasicFileAttributeView.class)
+                .setTimes(FileTime.fromMillis(1_000), null, FileTime.fromMillis(1_000));
+        Files.getFileAttributeView(duplicate, BasicFileAttributeView.class)
+                .setTimes(FileTime.fromMillis(2_000), null, FileTime.fromMillis(2_000));
+        Files.writeString(tempDir.resolve("different.jpg"), "diff");
+        Files.writeString(tempDir.resolve("unique.png"), "unique");
+        Files.writeString(tempDir.resolve("ignored.txt"), "same");
 
-        byte[] actual = helper.getByteArrayFromFile(resource.toFile());
-        byte[] byteArray = Files.readAllBytes(resource);
-        byte[] byteArrayFromFile = helper.getByteArrayFromFile(resource.toFile());
+        ScanResult result = new FileHelper(tempDir.toString()).scan();
 
-        assertThat(actual).isNotNull();
-        assertThat(actual).isEqualTo(byteArray);
-        assertThat(actual).containsExactly(byteArrayFromFile);
+        assertThat(result.scannedFiles()).isEqualTo(4);
+        assertThat(result.duplicateCount()).isEqualTo(1);
+        assertThat(result.duplicateBytes()).isEqualTo(4);
+        assertThat(result.duplicateGroups()).singleElement().satisfies(group -> {
+            assertThat(group.original()).isEqualTo(original.toAbsolutePath());
+            assertThat(group.duplicates()).containsExactly(duplicate.toAbsolutePath());
+            assertThat(group.fileSize()).isEqualTo(4);
+        });
     }
 
     @Test
-    void givenNoFile_whenGetByteArrayFromFile_thenThrowFileNotFoundException(@TempDir Path tempDir) {
-        helper = new FileHelper(tempDir.toString());
-        try {
-            helper.getByteArrayFromFile(new File(""));
-        } catch (Exception ex) {
-            assertThat(ex).isInstanceOf(FileNotFoundException.class);
-        }
-    }
+    void scanRejectsNonDirectory(@TempDir Path tempDir) throws IOException {
+        Path file = Files.writeString(tempDir.resolve("image.jpg"), "content");
 
-    @Test
-    public void testMoveDuplicates(@TempDir Path tempDir) throws Exception {
-        helper = new FileHelper(tempDir.toString());
-        List<File> duplicatesList = helper.createDuplicatesList(helper.createPossibleDuplicates());
-
-        helper.moveDuplicates(duplicatesList);
-
-        assertThat(duplicatesList).isNotNull();
-        assertThat(duplicatesList).isEmpty();
-    }
-
-    @Test
-    public void testFolderCreation(@TempDir Path tmpDir) throws Exception {
-        Path dir = tmpDir.resolve("duplicates");
-        helper = new FileHelper(tmpDir.toString());
-        helper.createDuplicateDirIfNotExists();
-        assertThat(Files.isDirectory(dir)).isTrue();
-        assertThat(Files.deleteIfExists(dir)).isTrue();
+        assertThatThrownBy(() -> new FileHelper(file.toString()).scan())
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("Not a readable directory");
     }
 }

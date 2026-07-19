@@ -4,150 +4,160 @@ import pg.duplicatefileremover.FileExtension;
 
 import java.io.*;
 import java.nio.file.*;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.FileTime;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Duration;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
-/**
- * @author Gawa
- */
 public class FileHelper {
+    private static final int HASH_BUFFER_SIZE = 64 * 1024;
+    private static final Set<String> ALLOWED_EXTENSIONS = EnumSet.allOf(FileExtension.class)
+            .stream()
+            .map(extension -> extension.extension)
+            .collect(Collectors.toUnmodifiableSet());
 
-    private final Path dirPath;
-    private final Path destDir;
-    private final boolean moveDuplicates;
-    private static final ConcurrentHashMap<Long, DuplicateDTO> filesMap = new ConcurrentHashMap<>();
-    public static final Set<String> extensions = new HashSet<>();
+    private final List<Path> roots;
 
-    public FileHelper(String dirPath) {
-        this(dirPath, false);
+    public FileHelper(String root) {
+        this(List.of(Path.of(root)));
     }
 
-    public FileHelper(String dirPath, boolean moveDuplicates) {
-        this.dirPath = Paths.get(dirPath);
-        this.destDir = Paths.get(dirPath, "duplicates");
-        this.moveDuplicates = moveDuplicates;
-    }
-
-    public void processDuplicates() throws NoSuchAlgorithmException, IOException {
-        List<File> possibleDuplicates = createPossibleDuplicates();
-        List<File> duplicates = createDuplicatesList(possibleDuplicates);
-
-        Map<Long, DuplicateDTO> filteredMap = filesMap.values()
-                .stream()
-                .filter(dto -> dto.processedDir.equals(dirPath))
-                .collect(Collectors.toMap(k -> k.size, v -> v));
-        String reportFile = "report-" + dirPath.toFile().getName().replaceAll(" ", "_") + ".html";
-
-        if (!filteredMap.isEmpty()) {
-            new ReportHelper(filteredMap, Paths.get(".", "reports", reportFile)).createReport();
-        }
-
-        if (moveDuplicates && !duplicates.isEmpty()) {
-            createDuplicateDirIfNotExists();
-            moveDuplicates(duplicates);
-        }
-    }
-
-    protected List<File> createPossibleDuplicates() {
-        List<File> fileList = getFileOnlyList();
-        System.out.printf("Processing [%d] files. Thread [%s].%n", fileList.size(), Thread.currentThread().getName());
-        List<File> possibleDuplicates = new ArrayList<>();
-        for (File file : fileList) {
-            extensions.add(file.getName().substring(file.getName().indexOf(".") + 1));
-            if (filesMap.containsKey(file.length())) {
-                filesMap.get(file.length()).sameFiles.add(file);
-                possibleDuplicates.add(file);
-            } else {
-                filesMap.put(
-                        file.length(),
-                        new DuplicateDTO(
-                                file.length(),
-                                new ArrayList<>(List.of(file)),
-                                dirPath
-                        )
-                );
-            }
-        }
-        return possibleDuplicates;
-    }
-
-    protected List<File> getFileOnlyList() {
-        if (dirPath == null || dirPath.toFile().isFile()) {
-            return new ArrayList<>();
-        }
-        Set<String> allowedExtensions = EnumSet.allOf(FileExtension.class)
-                .stream()
-                .map(fe -> fe.extension)
-                .collect(Collectors.toSet());
-        return Arrays.stream(Optional.ofNullable(dirPath.toFile().listFiles()).orElseGet(() -> new File[0]))
-                .filter(File::isFile)
-                .filter(f -> allowedExtensions.contains(f.getName().substring(f.getName().indexOf(".") + 1)))
+    public FileHelper(List<Path> roots) {
+        this.roots = roots.stream()
+                .map(path -> path.toAbsolutePath().normalize())
+                .distinct()
                 .toList();
     }
 
-    protected List<File> createDuplicatesList(List<File> possibleDuplicates) throws NoSuchAlgorithmException, IOException {
-        List<File> duplicatesList = new ArrayList<>();
-        for (File possibleDuplicate : possibleDuplicates) {
-            DuplicateDTO duplicateDto = filesMap.get(possibleDuplicate.length());
-            if (duplicateDto.sameFiles != null && duplicateDto.sameFiles.size() > 1) {
-                String posDupHash = getSHAHashForFile(possibleDuplicate);
-                for (File file: duplicateDto.sameFiles) {
-                    String notDupHash = getSHAHashForFile(file);
-                    if (posDupHash.equals(notDupHash)) {
-                        duplicateDto.fileHash = notDupHash;
-                        duplicatesList.add(possibleDuplicate);
-                    }
+    public ScanResult scan() throws IOException, NoSuchAlgorithmException {
+        long startNanos = System.nanoTime();
+        List<Path> mediaFiles = collectMediaFiles();
+        Map<Long, List<Path>> filesBySize = new LinkedHashMap<>();
+        long scannedFiles = 0;
+        for (Path mediaFile : mediaFiles) {
+            try {
+                filesBySize.computeIfAbsent(Files.size(mediaFile), ignored -> new ArrayList<>()).add(mediaFile);
+                scannedFiles++;
+            } catch (IOException exception) {
+                System.err.printf("Skipping unreadable media file [%s]: %s%n", mediaFile, exception.getMessage());
+            }
+        }
+        List<DuplicateGroup> duplicateGroups = new ArrayList<>();
+
+        for (Map.Entry<Long, List<Path>> sizeGroup : filesBySize.entrySet()) {
+            if (sizeGroup.getValue().size() < 2) {
+                continue;
+            }
+            Map<String, List<Path>> filesByHash = new LinkedHashMap<>();
+            for (Path path : sizeGroup.getValue()) {
+                filesByHash.computeIfAbsent(getSHAHashForFile(path), ignored -> new ArrayList<>()).add(path);
+            }
+            for (Map.Entry<String, List<Path>> hashGroup : filesByHash.entrySet()) {
+                List<Path> matchingFiles = hashGroup.getValue();
+                if (matchingFiles.size() > 1) {
+                    matchingFiles.sort(Comparator
+                            .comparing(this::creationTime)
+                            .thenComparing(this::lastModifiedTime)
+                            .thenComparing(Path::toString));
+                    duplicateGroups.add(new DuplicateGroup(
+                            hashGroup.getKey(),
+                            sizeGroup.getKey(),
+                            matchingFiles.getFirst(),
+                            matchingFiles.subList(1, matchingFiles.size())
+                    ));
                 }
             }
         }
-        /*duplicatesList.forEach(file -> {
-            System.out.printf("Duplicate: %s%n", file.getName());
-        });*/
-        return duplicatesList;
+
+        duplicateGroups.sort(Comparator.comparing(group -> group.original().toString()));
+        return new ScanResult(scannedFiles, duplicateGroups, Duration.ofNanos(System.nanoTime() - startNanos));
+    }
+
+    protected List<File> getFileOnlyList() {
+        if (roots.size() != 1 || !Files.isDirectory(roots.getFirst())) {
+            return List.of();
+        }
+        try (var files = Files.list(roots.getFirst())) {
+            return files.filter(Files::isRegularFile)
+                    .filter(FileHelper::isSupportedMedia)
+                    .sorted()
+                    .map(Path::toFile)
+                    .toList();
+        } catch (IOException exception) {
+            return List.of();
+        }
     }
 
     protected String getSHAHashForFile(File file) throws NoSuchAlgorithmException, IOException {
-        MessageDigest md = MessageDigest.getInstance("SHA-256");
-        byte[] dataBytes = getByteArrayFromFile(file);
-        byte[] mdBytes = md.digest(dataBytes);
+        return getSHAHashForFile(file.toPath());
+    }
 
-        StringBuilder hexString = new StringBuilder();
-        for (byte mdByte : mdBytes) {
-            hexString.append(Integer.toHexString(0xFF & mdByte));
+    public static String getSHAHashForFile(Path file) throws NoSuchAlgorithmException, IOException {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        byte[] buffer = new byte[HASH_BUFFER_SIZE];
+        try (InputStream input = Files.newInputStream(file)) {
+            int bytesRead;
+            while ((bytesRead = input.read(buffer)) != -1) {
+                digest.update(buffer, 0, bytesRead);
+            }
         }
-        return hexString.toString();
+        return java.util.HexFormat.of().formatHex(digest.digest());
     }
 
     protected byte[] getByteArrayFromFile(File file) throws IOException {
-        byte[] byteArray;
-        try (FileInputStream fis = new FileInputStream(file)) {
-            byteArray = new byte[(int) file.length()];
-            fis.read(byteArray);
-        }
-        return byteArray;
+        return Files.readAllBytes(file.toPath());
     }
 
-    public void createDuplicateDirIfNotExists() throws IOException {
-        if (!Files.exists(destDir)) {
-            Files.createDirectory(destDir);
-        }
-    }
-
-    protected void moveDuplicates(List<File> duplicatesList) {
-        List<File> pomList = new LinkedList<>(duplicatesList);
-        for (File file : pomList) {
-            try {
-                Path source = Paths.get(file.getAbsolutePath());
-                Path destination = Paths.get(destDir.toString(), file.getName());
-                Files.move(source, destination, StandardCopyOption.REPLACE_EXISTING);
-                System.out.printf("Duplicate %s moved to %s%n", file.getName(), destination);
-                duplicatesList.remove(file);
-            } catch (IOException ex) {
-                System.err.println("Can't move the file." + ex.getMessage());
+    private List<Path> collectMediaFiles() throws IOException {
+        Set<Path> mediaFiles = new LinkedHashSet<>();
+        for (Path root : roots) {
+            if (!Files.isDirectory(root)) {
+                throw new IOException("Not a readable directory: " + root);
             }
+            Files.walkFileTree(root, new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) {
+                    if (attributes.isRegularFile() && isSupportedMedia(file)) {
+                        mediaFiles.add(file.toAbsolutePath().normalize());
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult visitFileFailed(Path file, IOException exception) {
+                    System.err.printf("Skipping unreadable path [%s]: %s%n", file, exception.getMessage());
+                    return FileVisitResult.CONTINUE;
+                }
+            });
+        }
+        return mediaFiles.stream().sorted().toList();
+    }
+
+    private static boolean isSupportedMedia(Path path) {
+        String filename = path.getFileName().toString();
+        int extensionSeparator = filename.lastIndexOf('.');
+        if (extensionSeparator < 0 || extensionSeparator == filename.length() - 1) {
+            return false;
+        }
+        return ALLOWED_EXTENSIONS.contains(filename.substring(extensionSeparator + 1).toLowerCase(Locale.ROOT));
+    }
+
+    private FileTime creationTime(Path path) {
+        try {
+            return Files.readAttributes(path, BasicFileAttributes.class).creationTime();
+        } catch (IOException exception) {
+            return FileTime.fromMillis(Long.MAX_VALUE);
+        }
+    }
+
+    private FileTime lastModifiedTime(Path path) {
+        try {
+            return Files.getLastModifiedTime(path);
+        } catch (IOException exception) {
+            return FileTime.fromMillis(Long.MAX_VALUE);
         }
     }
 }

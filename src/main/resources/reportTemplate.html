@@ -1,29 +1,205 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <title>Title</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Duplicate Media Report</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet"
+          integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
     <style>
-        table, th, td {
-            border: 1px solid;
-            padding: 2px 2px 2px 2px;
+        body { background: #f4f7fb; }
+        .report-header { background: linear-gradient(135deg, #172554, #2563eb); color: white; }
+        .summary-card { border: 0; box-shadow: 0 .25rem 1rem rgba(15, 23, 42, .08); }
+        .summary-value { font-size: 1.55rem; font-weight: 700; color: #172554; }
+        .table-card { border: 0; box-shadow: 0 .5rem 1.5rem rgba(15, 23, 42, .08); }
+        .media-card { display: flex; align-items: center; gap: 1rem; padding: .75rem; border: 1px solid #dee2e6; border-radius: .75rem; background: white; }
+        .original-card { border-left: .3rem solid #198754; }
+        .duplicate-card { border-left: .3rem solid #0d6efd; }
+        .media-preview { width: 9rem; height: 6rem; flex: 0 0 auto; background: #e9ecef; border-radius: .5rem; overflow: hidden; }
+        .media-preview img, .media-preview video { width: 100%; height: 100%; object-fit: cover; }
+        .path-text { overflow-wrap: anywhere; color: #495057; font-family: var(--bs-font-monospace); font-size: .82rem; }
+        .min-width-0 { min-width: 0; }
+        code { font-size: .72rem; }
+        @media (max-width: 768px) {
+            .media-card { align-items: stretch; flex-direction: column; }
+            .media-preview { width: 100%; height: 12rem; }
         }
     </style>
 </head>
 <body>
+<header class="report-header py-5 mb-4">
+    <div class="container-fluid px-4 px-lg-5">
+        <h1 class="display-6 fw-bold mb-2">Duplicate Media Report</h1>
+        <p class="lead mb-0 opacity-75">Review detected copies before removing them from disk.</p>
+    </div>
+</header>
 
-<h2>Duplicates report</h2>
-<table>
-    <thead>
-    <tr>
-        <td>File size</td>
-        <td>File hash</td>
-        <td>File paths</td>
-    </tr>
-    </thead>
-    <tbody>
-        ${duplicatesContent}
-    </tbody>
-</table>
+<main class="container-fluid px-4 px-lg-5 pb-5">
+    <section class="row g-3 mb-4" aria-label="Scan summary">
+        <div class="col-6 col-xl-3"><div class="card summary-card h-100"><div class="card-body"><div class="text-secondary small text-uppercase">Files scanned</div><div id="scanned-files" class="summary-value">${scannedFiles}</div></div></div></div>
+        <div class="col-6 col-xl-3"><div class="card summary-card h-100"><div class="card-body"><div class="text-secondary small text-uppercase">Duplicates found</div><div id="duplicate-count" class="summary-value">${duplicateCount}</div></div></div></div>
+        <div class="col-6 col-xl-3"><div class="card summary-card h-100"><div class="card-body"><div class="text-secondary small text-uppercase">Duplicate space</div><div id="duplicate-space" class="summary-value" data-bytes="${duplicateBytesRaw}">${duplicateBytes}</div></div></div></div>
+        <div class="col-6 col-xl-3"><div class="card summary-card h-100"><div class="card-body"><div class="text-secondary small text-uppercase">Scan time</div><div id="scan-duration" class="summary-value">${scanDuration}</div></div></div></div>
+    </section>
+
+    <div id="status-message" class="alert d-none" role="status"></div>
+
+    <section id="remove-progress-section" class="card summary-card d-none mb-4" aria-live="polite">
+        <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <span class="fw-semibold text-info-emphasis">Removing duplicate files</span>
+                <span id="remove-progress-text" class="text-secondary">0 / 0</span>
+            </div>
+            <div class="progress" role="progressbar" aria-label="Duplicate removal progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                <div id="remove-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated bg-info" style="width: 0%">0%</div>
+            </div>
+        </div>
+    </section>
+
+    <section class="card table-card">
+        <div class="card-header bg-white d-flex flex-wrap align-items-center justify-content-between gap-3 py-3">
+            <div><h2 class="h4 mb-1">Detected duplicate groups</h2><div class="text-secondary small">Only files labelled Duplicate can be removed.</div></div>
+            <button id="remove-all" type="button" class="btn btn-danger">Remove All Duplicates</button>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light"><tr><th scope="col">Group</th><th scope="col">Origin file</th><th scope="col">Duplicate files</th><th scope="col">Details</th></tr></thead>
+                <tbody id="duplicates-table">${duplicatesContent}</tbody>
+            </table>
+        </div>
+    </section>
+</main>
+
+<div class="toast-container position-fixed top-0 end-0 p-3">
+    <div id="completion-toast" class="toast text-bg-info border-0" role="alert" aria-live="assertive" aria-atomic="true">
+        <div class="d-flex">
+            <div id="completion-toast-message" class="toast-body">All duplicate files have been removed.</div>
+            <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+        </div>
+    </div>
+</div>
+
+<!-- Scripts -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" crossorigin="anonymous"></script>
+<script>
+    (() => {
+        const apiBase = '${apiBase}';
+        const apiToken = '${apiToken}';
+        const duplicateCount = document.getElementById('duplicate-count');
+        const duplicateSpace = document.getElementById('duplicate-space');
+        const removeAllButton = document.getElementById('remove-all');
+        const statusMessage = document.getElementById('status-message');
+        const progressSection = document.getElementById('remove-progress-section');
+        const progressContainer = progressSection.querySelector('.progress');
+        const progressBar = document.getElementById('remove-progress-bar');
+        const progressText = document.getElementById('remove-progress-text');
+        const completionToast = document.getElementById('completion-toast');
+        const completionToastMessage = document.getElementById('completion-toast-message');
+
+        const formatBytes = bytes => {
+            if (bytes < 1024) return `${bytes} B`;
+            const units = ['KiB', 'MiB', 'GiB', 'TiB'];
+            let value = bytes;
+            let unit = -1;
+            do { value /= 1024; unit++; } while (value >= 1024 && unit < units.length - 1);
+            return `${value.toFixed(2)} ${units[unit]}`;
+        };
+
+        const showStatus = (message, type) => {
+            statusMessage.textContent = message;
+            statusMessage.className = `alert alert-${type}`;
+        };
+
+        const updateProgress = (processed, total) => {
+            const percentage = total === 0 ? 100 : Math.round(processed * 100 / total);
+            progressBar.style.width = `${percentage}%`;
+            progressBar.textContent = `${percentage}%`;
+            progressText.textContent = `${processed} / ${total}`;
+            progressContainer.setAttribute('aria-valuenow', String(percentage));
+        };
+
+        const showCompletionToast = message => {
+            completionToastMessage.textContent = message;
+            bootstrap.Toast.getOrCreateInstance(completionToast, {delay: 6000}).show();
+        };
+
+        const removeCard = id => {
+            const card = document.querySelector(`.duplicate-card[data-duplicate-id="${id}"]`);
+            if (!card) return;
+            const bytes = Number(card.dataset.bytes);
+            const group = card.closest('.duplicate-group');
+            card.remove();
+            duplicateCount.textContent = String(Math.max(0, Number(duplicateCount.textContent) - 1));
+            const remainingBytes = Math.max(0, Number(duplicateSpace.dataset.bytes) - bytes);
+            duplicateSpace.dataset.bytes = String(remainingBytes);
+            duplicateSpace.textContent = formatBytes(remainingBytes);
+            if (group && !group.querySelector('.duplicate-card')) group.remove();
+            if (!document.querySelector('.duplicate-card')) {
+                removeAllButton.disabled = true;
+                document.getElementById('duplicates-table').innerHTML = '<tr><td colspan="4" class="text-center py-5 text-secondary">All reported duplicates have been removed.</td></tr>';
+            }
+        };
+
+        const removeDuplicate = async button => {
+            if (!window.confirm('Permanently remove this duplicate file?')) return;
+            button.disabled = true;
+            try {
+                const response = await fetch(`${apiBase}/api/duplicates/${encodeURIComponent(button.dataset.id)}?token=${encodeURIComponent(apiToken)}`, {method: 'DELETE'});
+                if (!response.ok) throw new Error(await response.text());
+                removeCard(button.dataset.id);
+                showStatus('Duplicate file removed.', 'success');
+            } catch (error) {
+                button.disabled = false;
+                showStatus(error.message || 'The file could not be removed.', 'danger');
+            }
+        };
+
+        document.addEventListener('click', event => {
+            const button = event.target.closest('.remove-duplicate');
+            if (button) removeDuplicate(button);
+        });
+
+        removeAllButton.disabled = Number(duplicateCount.textContent) === 0;
+        removeAllButton.addEventListener('click', async () => {
+            if (!window.confirm('Permanently remove every duplicate listed in this report? Origin files will be preserved.')) return;
+            const cards = Array.from(document.querySelectorAll('.duplicate-card'));
+            const total = cards.length;
+            if (total === 0) return;
+
+            removeAllButton.disabled = true;
+            cards.forEach(card => card.querySelector('.remove-duplicate').disabled = true);
+            progressSection.classList.remove('d-none');
+            progressBar.classList.add('progress-bar-animated');
+            updateProgress(0, total);
+
+            let deleted = 0;
+            let failed = 0;
+            for (const card of cards) {
+                const id = card.dataset.duplicateId;
+                try {
+                    const response = await fetch(`${apiBase}/api/duplicates/${encodeURIComponent(id)}?token=${encodeURIComponent(apiToken)}`, {method: 'DELETE'});
+                    if (!response.ok) throw new Error(await response.text());
+                    removeCard(id);
+                    deleted++;
+                } catch (error) {
+                    failed++;
+                    const button = card.querySelector('.remove-duplicate');
+                    if (button) button.disabled = false;
+                }
+                updateProgress(deleted + failed, total);
+            }
+
+            progressBar.classList.remove('progress-bar-animated');
+            if (failed === 0) {
+                showCompletionToast(`All ${deleted} duplicate files have been removed.`);
+            } else {
+                removeAllButton.disabled = false;
+                showStatus(`${deleted} removed; ${failed} changed or unavailable and were preserved.`, 'warning');
+            }
+        });
+    })();
+</script>
 </body>
 </html>
