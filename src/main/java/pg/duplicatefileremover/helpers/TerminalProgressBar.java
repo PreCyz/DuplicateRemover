@@ -1,11 +1,12 @@
 package pg.duplicatefileremover.helpers;
 
 import java.io.PrintStream;
-import java.util.Locale;
-import java.util.Objects;
+import java.time.Duration;
+import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 
 public final class TerminalProgressBar implements AutoCloseable {
     private static final int BAR_WIDTH = 24;
@@ -16,8 +17,10 @@ public final class TerminalProgressBar implements AutoCloseable {
     private final boolean interactive;
     private final ScheduledExecutorService renderer;
     private final AtomicReference<ScanProgress.Snapshot> latestSnapshot;
+    private final LongSupplier nanoTime;
     private final Consumer<ScanProgress.Snapshot> progressListener = this::observeProgress;
     private ScanProgress.Stage lastPrintedStage;
+    private long stageStartedNanos;
     private int frame;
     private int previousLength;
 
@@ -26,10 +29,21 @@ public final class TerminalProgressBar implements AutoCloseable {
     }
 
     TerminalProgressBar(ScanProgress progress, PrintStream output, boolean interactive) {
+        this(progress, output, interactive, System::nanoTime);
+    }
+
+    TerminalProgressBar(
+            ScanProgress progress,
+            PrintStream output,
+            boolean interactive,
+            LongSupplier nanoTime
+    ) {
         this.progress = Objects.requireNonNull(progress, "progress");
         this.output = Objects.requireNonNull(output, "output");
         this.interactive = interactive;
+        this.nanoTime = Objects.requireNonNull(nanoTime, "nanoTime");
         latestSnapshot = new AtomicReference<>(progress.snapshot());
+        stageStartedNanos = nanoTime.getAsLong();
         renderer = Executors.newSingleThreadScheduledExecutor(
                 Thread.ofPlatform().daemon().name("scan-progress-renderer").factory()
         );
@@ -63,7 +77,7 @@ public final class TerminalProgressBar implements AutoCloseable {
                     snapshot.directoriesProcessed(),
                     snapshot.mediaFilesDiscovered()
             );
-            case READING_METADATA -> determinate("Reading metadata", snapshot);
+            case GROUPING_BY_SIZE -> determinate("Grouping by size", snapshot);
             case SAMPLING -> determinate("Sampling content", snapshot);
             case HASHING -> determinate("Hashing", snapshot);
             case FINALIZING -> determinate("Finalizing", snapshot);
@@ -80,6 +94,61 @@ public final class TerminalProgressBar implements AutoCloseable {
                     snapshot.directoriesProcessed()
             );
         };
+    }
+
+    private static String formatCompleted(
+            ScanProgress.Snapshot snapshot,
+            int frame,
+            Duration elapsed
+    ) {
+        return "%s (%s)".formatted(format(snapshot, frame), formatDuration(elapsed));
+    }
+
+    private static String formatActive(
+            ScanProgress.Snapshot snapshot,
+            int frame,
+            Duration elapsed
+    ) {
+        return "%s (%s)".formatted(format(snapshot, frame), formatActiveDuration(elapsed));
+    }
+
+    static String formatActiveDuration(Duration duration) {
+        long totalSeconds = Math.max(0, duration.toSeconds());
+        long hours = totalSeconds / 3_600;
+        long minutes = totalSeconds % 3_600 / 60;
+        long seconds = totalSeconds % 60;
+        StringJoiner formatted = new StringJoiner(" ");
+        if (hours != 0) {
+            formatted.add(hours + "h");
+        }
+        if (minutes != 0) {
+            formatted.add(minutes + "m");
+        }
+        if (seconds != 0) {
+            formatted.add(seconds + "s");
+        }
+        return formatted.length() == 0 ? "0s" : formatted.toString();
+    }
+
+    static String formatDuration(Duration duration) {
+        long hours = duration.toHours();
+        long minutes = duration.toMinutesPart();
+        long seconds = duration.toSecondsPart();
+        long millis = duration.toMillisPart();
+        StringJoiner formatted = new StringJoiner(" ");
+        if (hours != 0) {
+            formatted.add(hours + "h");
+        }
+        if (minutes != 0) {
+            formatted.add(minutes + "m");
+        }
+        if (seconds != 0) {
+            formatted.add(seconds + "s");
+        }
+        if (millis != 0) {
+            formatted.add(millis + "ms");
+        }
+        return formatted.length() == 0 ? "0ms" : formatted.toString();
     }
 
     private static String determinate(String label, ScanProgress.Snapshot snapshot) {
@@ -109,6 +178,11 @@ public final class TerminalProgressBar implements AutoCloseable {
 
     synchronized void render() {
         ScanProgress.Snapshot snapshot = progress.snapshot();
+        if (!interactive && snapshot.stage() != ScanProgress.Stage.NOT_STARTED
+                && snapshot.stage() != ScanProgress.Stage.COMPLETE
+                && snapshot.stage() != ScanProgress.Stage.FAILED) {
+            return;
+        }
         if (!interactive && snapshot.stage() == lastPrintedStage) {
             return;
         }
@@ -120,7 +194,13 @@ public final class TerminalProgressBar implements AutoCloseable {
             return;
         }
 
-        String line = format(snapshot, frame++);
+        String line = isWorkStage(snapshot.stage())
+                ? formatActive(
+                        snapshot,
+                        frame++,
+                        Duration.ofNanos(Math.max(0, nanoTime.getAsLong() - stageStartedNanos))
+                )
+                : format(snapshot, frame++);
         if (interactive) {
             if (lastPrintedStage != null && snapshot.stage() != lastPrintedStage) {
                 output.println();
@@ -142,10 +222,42 @@ public final class TerminalProgressBar implements AutoCloseable {
         ScanProgress.Snapshot previous = latestSnapshot.getAndSet(snapshot);
         if (previous != null && previous.stage() != snapshot.stage()) {
             synchronized (this) {
-                renderSnapshot(previous);
-                renderSnapshot(snapshot);
+                long transitionNanos = nanoTime.getAsLong();
+                if (isWorkStage(previous.stage())) {
+                    renderCompletedSnapshot(
+                            previous,
+                            Duration.ofNanos(Math.max(0, transitionNanos - stageStartedNanos))
+                    );
+                }
+                stageStartedNanos = transitionNanos;
+                if (interactive
+                        || snapshot.stage() == ScanProgress.Stage.COMPLETE
+                        || snapshot.stage() == ScanProgress.Stage.FAILED) {
+                    renderSnapshot(snapshot);
+                }
             }
         }
+    }
+
+    private void renderCompletedSnapshot(ScanProgress.Snapshot snapshot, Duration elapsed) {
+        String line = formatCompleted(snapshot, frame++, elapsed);
+        if (interactive) {
+            int padding = Math.max(0, previousLength - line.length());
+            output.print('\r');
+            output.print(line);
+            output.print(" ".repeat(padding));
+            previousLength = line.length();
+        } else {
+            output.println(line);
+        }
+        output.flush();
+        lastPrintedStage = snapshot.stage();
+    }
+
+    private static boolean isWorkStage(ScanProgress.Stage stage) {
+        return stage != ScanProgress.Stage.NOT_STARTED
+                && stage != ScanProgress.Stage.COMPLETE
+                && stage != ScanProgress.Stage.FAILED;
     }
 
     private synchronized void printWarning(String message) {
@@ -157,6 +269,8 @@ public final class TerminalProgressBar implements AutoCloseable {
         output.println("Warning: " + message);
         previousLength = 0;
         lastPrintedStage = null;
-        renderSnapshot(progress.snapshot());
+        if (interactive) {
+            renderSnapshot(progress.snapshot());
+        }
     }
 }

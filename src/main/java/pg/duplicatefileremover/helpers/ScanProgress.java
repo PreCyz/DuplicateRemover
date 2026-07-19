@@ -101,7 +101,7 @@ public final class ScanProgress {
     public enum Stage {
         NOT_STARTED,
         DISCOVERING,
-        READING_METADATA,
+        GROUPING_BY_SIZE,
         SAMPLING,
         HASHING,
         FINALIZING,

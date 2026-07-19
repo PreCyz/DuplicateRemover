@@ -9,7 +9,7 @@ import java.nio.file.Path;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.LocalTime;
-import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -18,6 +18,10 @@ public class DuplicateFileRemover {
     private static final Path REPORT_PATH = Path.of(System.getProperty(
             "duplicate.report.path",
             Path.of("reports", "duplicates-report.html").toString()
+    ));
+    private static final Path HASH_CACHE_PATH = Path.of(System.getProperty(
+            "duplicate.hash.cache.path",
+            Path.of("reports", "hash-cache.properties").toString()
     ));
 
     private final FileHelper helper;
@@ -32,13 +36,12 @@ public class DuplicateFileRemover {
 
     public static void main(String[] args) {
         try {
-            validateArgs(args);
-            IO.println(scanConcurrencyInfo());
-            List<Path> roots = Arrays.stream(args).map(Path::of).toList();
+            ApplicationArguments arguments = parseArguments(args);
+            IO.println(scanConcurrencyInfo(arguments.diskType()));
             ScanProgress progress = new ScanProgress();
             ScanResult result;
             try (TerminalProgressBar progressBar = new TerminalProgressBar(progress)) {
-                result = new FileHelper(roots, progress).scan();
+                result = new FileHelper(arguments.roots(), progress, arguments.diskType(), HASH_CACHE_PATH).scan();
             }
 
             try (ReportServer server = new ReportServer(result, REPORT_PATH)) {
@@ -68,9 +71,15 @@ public class DuplicateFileRemover {
         );
     }
 
-    static String scanConcurrencyInfo() {
-        return "Using up to %d simultaneous virtual threads for file scanning."
-                .formatted(FileHelper.concurrentWorkerCount());
+    static String scanConcurrencyInfo(DiskType diskType) {
+        FileHelper.ScanProfile profile = FileHelper.scanProfile(diskType);
+        return "Disk type: %s. Using up to %d traversal, %d sampling, and %d hashing virtual threads."
+                .formatted(
+                        diskType.displayName(),
+                        profile.traversalWorkers(),
+                        profile.samplingWorkers(),
+                        profile.hashingWorkers()
+                );
     }
 
     static String missingHeartbeatInfo(Duration heartbeatSilence) {
@@ -79,14 +88,46 @@ public class DuplicateFileRemover {
     }
 
     protected static void validateArgs(String[] args) {
+        parseArguments(args);
+    }
+
+    static ApplicationArguments parseArguments(String[] args) {
         if (args == null || args.length == 0) {
             throw new UnsupportedOperationException("Path to folder not specified.");
         }
-        for (String argument : args) {
+        DiskType diskType = DiskType.HDD;
+        boolean diskTypeSpecified = false;
+        List<Path> roots = new ArrayList<>();
+        for (int index = 0; index < args.length; index++) {
+            String argument = args[index];
             if (argument == null || argument.isBlank()) {
                 throw new IllegalArgumentException("Illegal argument.");
             }
+            String diskValue = null;
+            if (argument.startsWith("--disk=")) {
+                diskValue = argument.substring("--disk=".length());
+            } else if ("--disk".equals(argument)) {
+                if (++index >= args.length) {
+                    throw new IllegalArgumentException("Missing value after --disk; expected HDD or NVMe.");
+                }
+                diskValue = args[index];
+            } else if (argument.startsWith("--")) {
+                throw new IllegalArgumentException("Unsupported argument: " + argument);
+            } else {
+                roots.add(Path.of(argument));
+            }
+            if (diskValue != null) {
+                if (diskTypeSpecified) {
+                    throw new IllegalArgumentException("Disk type may be specified only once.");
+                }
+                diskType = DiskType.fromArgument(diskValue);
+                diskTypeSpecified = true;
+            }
         }
+        if (roots.isEmpty()) {
+            throw new UnsupportedOperationException("Path to folder not specified.");
+        }
+        return new ApplicationArguments(List.copyOf(roots), diskType);
     }
 
     private static void openBrowser(ReportServer server) {
@@ -126,5 +167,8 @@ public class DuplicateFileRemover {
         if (browserExit.isDone() && !terminalExit.isDone()) {
             IO.println(missingHeartbeatInfo(server.heartbeatSilenceBeforeShutdown()));
         }
+    }
+
+    record ApplicationArguments(List<Path> roots, DiskType diskType) {
     }
 }

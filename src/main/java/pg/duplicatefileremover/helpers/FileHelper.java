@@ -1,5 +1,6 @@
 package pg.duplicatefileremover.helpers;
 
+import pg.duplicatefileremover.DiskType;
 import pg.duplicatefileremover.FileExtension;
 
 import java.io.*;
@@ -17,10 +18,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 public class FileHelper {
-    private static final int HASH_BUFFER_SIZE = 64 * 1024;
+    private static final int DEFAULT_HASH_BUFFER_SIZE = 64 * 1024;
     private static final int FINGERPRINT_SAMPLE_SIZE = 64 * 1024;
     private static final long FINGERPRINT_MIN_FILE_SIZE = FINGERPRINT_SAMPLE_SIZE * 3L;
-    private static final int MAX_CONCURRENT_FILE_OPERATIONS = Math.clamp(Runtime.getRuntime().availableProcessors() * 2L, 4, 32);
     private static final Set<String> ALLOWED_EXTENSIONS = EnumSet.allOf(FileExtension.class)
             .stream()
             .map(extension -> extension.extension)
@@ -28,6 +28,8 @@ public class FileHelper {
 
     private final List<Path> roots;
     private final ScanProgress progress;
+    private final ScanProfile scanProfile;
+    private final HashCache hashCache;
 
     public FileHelper(String root) {
         this(List.of(Path.of(root)));
@@ -38,47 +40,57 @@ public class FileHelper {
     }
 
     public FileHelper(List<Path> roots, ScanProgress progress) {
+        this(roots, progress, DiskType.HDD, null);
+    }
+
+    public FileHelper(List<Path> roots, ScanProgress progress, DiskType diskType, Path hashCachePath) {
         this.roots = roots.stream()
                 .map(path -> path.toAbsolutePath().normalize())
                 .distinct()
                 .toList();
         this.progress = Objects.requireNonNull(progress, "progress");
+        this.scanProfile = scanProfile(Objects.requireNonNull(diskType, "diskType"));
+        this.hashCache = new HashCache(hashCachePath);
     }
 
     public ScanResult scan() throws IOException, NoSuchAlgorithmException {
         long startNanos = System.nanoTime();
         progress.begin(ScanProgress.Stage.DISCOVERING, 0);
         try {
-            ConcurrentMap<Long, ConcurrentLinkedQueue<Path>> filesBySize;
-            ConcurrentMap<HashKey, ConcurrentLinkedQueue<Path>> filesByHash;
+            hashCache.load(progress);
+            Map<Long, List<FileMetadata>> filesBySize;
+            ConcurrentMap<HashKey, ConcurrentLinkedQueue<FileMetadata>> filesByHash;
             try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
-                List<Path> mediaFiles = collectMediaFiles(executor);
-                filesBySize = groupFilesBySize(mediaFiles, executor);
-                ConcurrentLinkedQueue<SizedPath> hashCandidates = prefilterHashCandidates(filesBySize, executor);
+                List<FileMetadata> mediaFiles = collectMediaFiles(executor);
+                filesBySize = groupFilesBySize(mediaFiles);
+                ConcurrentLinkedQueue<FileMetadata> hashCandidates = prefilterHashCandidates(filesBySize, executor);
                 filesByHash = groupFilesByHash(hashCandidates, executor);
             }
+            hashCache.save(progress);
 
             progress.begin(ScanProgress.Stage.FINALIZING, filesByHash.size());
             List<DuplicateGroup> duplicateGroups = new ArrayList<>();
-            for (Map.Entry<HashKey, ConcurrentLinkedQueue<Path>> hashGroup : filesByHash.entrySet()) {
-                List<Path> matchingFiles = new ArrayList<>(hashGroup.getValue());
+            for (Map.Entry<HashKey, ConcurrentLinkedQueue<FileMetadata>> hashGroup : filesByHash.entrySet()) {
+                List<FileMetadata> matchingFiles = new ArrayList<>(hashGroup.getValue());
                 if (matchingFiles.size() > 1) {
                     matchingFiles.sort(Comparator
-                            .comparing(this::creationTime)
-                            .thenComparing(this::lastModifiedTime)
-                            .thenComparing(Path::toString));
+                            .comparing(FileMetadata::creationTime)
+                            .thenComparing(FileMetadata::lastModifiedTime)
+                            .thenComparing(metadata -> metadata.path().toString()));
                     duplicateGroups.add(new DuplicateGroup(
                             hashGroup.getKey().hash(),
                             hashGroup.getKey().size(),
-                            matchingFiles.getFirst(),
-                            matchingFiles.subList(1, matchingFiles.size())
+                            matchingFiles.getFirst().path(),
+                            matchingFiles.subList(1, matchingFiles.size()).stream()
+                                    .map(FileMetadata::path)
+                                    .toList()
                     ));
                 }
                 progress.itemCompleted();
             }
 
             duplicateGroups.sort(Comparator.comparing(group -> group.original().toString()));
-            long scannedFiles = filesBySize.values().stream().mapToLong(ConcurrentLinkedQueue::size).sum();
+            long scannedFiles = filesBySize.values().stream().mapToLong(List::size).sum();
             progress.complete();
             return new ScanResult(scannedFiles, duplicateGroups, Duration.ofNanos(System.nanoTime() - startNanos));
         } catch (IOException | NoSuchAlgorithmException | RuntimeException exception) {
@@ -88,7 +100,21 @@ public class FileHelper {
     }
 
     public static int concurrentWorkerCount() {
-        return MAX_CONCURRENT_FILE_OPERATIONS;
+        ScanProfile profile = scanProfile(DiskType.HDD);
+        return Math.max(profile.traversalWorkers(), Math.max(profile.samplingWorkers(), profile.hashingWorkers()));
+    }
+
+    public static ScanProfile scanProfile(DiskType diskType) {
+        int processors = Runtime.getRuntime().availableProcessors();
+        return switch (diskType) {
+            case HDD -> new ScanProfile(2, 1, 1, 256 * 1024);
+            case NVME -> new ScanProfile(
+                    (int) Math.clamp((long) processors, 4, 16),
+                    (int) Math.clamp(processors * 2L, 4, 32),
+                    (int) Math.clamp((long) processors, 2, 16),
+                    1024 * 1024
+            );
+        };
     }
 
     protected List<File> getFileOnlyList() {
@@ -112,7 +138,12 @@ public class FileHelper {
 
     public static String getSHAHashForFile(Path file) throws NoSuchAlgorithmException, IOException {
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        byte[] buffer = new byte[HASH_BUFFER_SIZE];
+        byte[] buffer = new byte[DEFAULT_HASH_BUFFER_SIZE];
+        return getSHAHashForFile(file, digest, buffer);
+    }
+
+    private static String getSHAHashForFile(Path file, MessageDigest digest, byte[] buffer) throws IOException {
+        digest.reset();
         try (InputStream input = Files.newInputStream(file)) {
             int bytesRead;
             while ((bytesRead = input.read(buffer)) != -1) {
@@ -126,10 +157,10 @@ public class FileHelper {
         return Files.readAllBytes(file.toPath());
     }
 
-    private List<Path> collectMediaFiles(ExecutorService executor) throws IOException {
+    private List<FileMetadata> collectMediaFiles(ExecutorService executor) throws IOException {
         LinkedBlockingQueue<Path> directories = new LinkedBlockingQueue<>();
         Set<Path> visitedDirectories = ConcurrentHashMap.newKeySet();
-        ConcurrentSkipListSet<Path> mediaFiles = new ConcurrentSkipListSet<>();
+        ConcurrentMap<Path, FileMetadata> mediaFiles = new ConcurrentHashMap<>();
         Phaser pendingDirectories = new Phaser(1);
         AtomicBoolean traversalComplete = new AtomicBoolean();
 
@@ -140,7 +171,7 @@ public class FileHelper {
             enqueueDirectory(root, directories, visitedDirectories, pendingDirectories);
         }
 
-        List<Future<?>> workers = startWorkers(executor, () -> {
+        List<Future<?>> workers = startWorkers(executor, scanProfile.traversalWorkers(), () -> {
             while (!traversalComplete.get() || !directories.isEmpty()) {
                 try {
                     Path directory = directories.poll(50, TimeUnit.MILLISECONDS);
@@ -157,70 +188,61 @@ public class FileHelper {
         pendingDirectories.arriveAndAwaitAdvance();
         traversalComplete.set(true);
         awaitWorkers(workers);
-        return List.copyOf(mediaFiles);
+        return mediaFiles.values().stream()
+                .sorted(Comparator.comparing(metadata -> metadata.path().toString()))
+                .toList();
     }
 
-    private ConcurrentMap<Long, ConcurrentLinkedQueue<Path>> groupFilesBySize(
-            List<Path> mediaFiles,
-            ExecutorService executor
-    ) throws IOException {
-        progress.begin(ScanProgress.Stage.READING_METADATA, mediaFiles.size());
-        ConcurrentLinkedQueue<Path> remainingFiles = new ConcurrentLinkedQueue<>(mediaFiles);
-        ConcurrentMap<Long, ConcurrentLinkedQueue<Path>> filesBySize = new ConcurrentHashMap<>();
-        List<Future<?>> workers = startWorkers(executor, () -> {
-            Path mediaFile;
-            while ((mediaFile = remainingFiles.poll()) != null) {
-                try {
-                    filesBySize.computeIfAbsent(Files.size(mediaFile), ignored -> new ConcurrentLinkedQueue<>())
-                            .add(mediaFile);
-                } catch (IOException exception) {
-                    progress.warning("Skipping unreadable media file [%s]: %s".formatted(
-                            mediaFile,
-                            exception.getMessage()
-                    ));
-                } finally {
-                    progress.itemCompleted();
-                }
-            }
-        });
-        awaitWorkers(workers);
+    private Map<Long, List<FileMetadata>> groupFilesBySize(List<FileMetadata> mediaFiles) {
+        progress.begin(ScanProgress.Stage.GROUPING_BY_SIZE, mediaFiles.size());
+        Map<Long, List<FileMetadata>> filesBySize = new HashMap<>();
+        for (FileMetadata mediaFile : mediaFiles) {
+            filesBySize.computeIfAbsent(mediaFile.size(), ignored -> new ArrayList<>()).add(mediaFile);
+            progress.itemCompleted();
+        }
         return filesBySize;
     }
 
-    private ConcurrentLinkedQueue<SizedPath> prefilterHashCandidates(
-            ConcurrentMap<Long, ConcurrentLinkedQueue<Path>> filesBySize,
+    private ConcurrentLinkedQueue<FileMetadata> prefilterHashCandidates(
+            Map<Long, List<FileMetadata>> filesBySize,
             ExecutorService executor
     ) throws IOException, NoSuchAlgorithmException {
-        ConcurrentLinkedQueue<SizedPath> candidates = new ConcurrentLinkedQueue<>();
+        ConcurrentLinkedQueue<FileMetadata> candidates = new ConcurrentLinkedQueue<>();
         filesBySize.forEach((size, paths) -> {
             if (paths.size() > 1) {
-                paths.forEach(path -> candidates.add(new SizedPath(size, path)));
+                candidates.addAll(paths);
             }
         });
         progress.begin(ScanProgress.Stage.SAMPLING, candidates.size());
 
-        ConcurrentLinkedQueue<SizedPath> fullHashCandidates = new ConcurrentLinkedQueue<>();
-        ConcurrentMap<QuickHashKey, ConcurrentLinkedQueue<SizedPath>> filesByFingerprint = new ConcurrentHashMap<>();
+        ConcurrentLinkedQueue<FileMetadata> fullHashCandidates = new ConcurrentLinkedQueue<>();
+        ConcurrentMap<QuickHashKey, ConcurrentLinkedQueue<FileMetadata>> filesByFingerprint = new ConcurrentHashMap<>();
         ConcurrentLinkedQueue<Exception> failures = new ConcurrentLinkedQueue<>();
-        List<Future<?>> workers = startWorkers(executor, () -> {
-            SizedPath candidate;
-            while (failures.isEmpty() && (candidate = candidates.poll()) != null) {
-                try {
-                    if (candidate.size() <= FINGERPRINT_MIN_FILE_SIZE) {
-                        fullHashCandidates.add(candidate);
-                    } else {
-                        QuickHashKey key = new QuickHashKey(
-                                candidate.size(),
-                                getSampledFingerprint(candidate.path(), candidate.size())
-                        );
-                        filesByFingerprint.computeIfAbsent(key, ignored -> new ConcurrentLinkedQueue<>())
-                                .add(candidate);
+        List<Future<?>> workers = startWorkers(executor, scanProfile.samplingWorkers(), () -> {
+            try {
+                MessageDigest digest = MessageDigest.getInstance("SHA-256");
+                ByteBuffer sample = ByteBuffer.allocate(FINGERPRINT_SAMPLE_SIZE);
+                FileMetadata candidate;
+                while (failures.isEmpty() && (candidate = candidates.poll()) != null) {
+                    try {
+                        if (candidate.size() <= FINGERPRINT_MIN_FILE_SIZE) {
+                            fullHashCandidates.add(candidate);
+                        } else {
+                            QuickHashKey key = new QuickHashKey(
+                                    candidate.size(),
+                                    getSampledFingerprint(candidate, digest, sample)
+                            );
+                            filesByFingerprint.computeIfAbsent(key, ignored -> new ConcurrentLinkedQueue<>())
+                                    .add(candidate);
+                        }
+                    } catch (IOException exception) {
+                        failures.add(exception);
+                    } finally {
+                        progress.itemCompleted();
                     }
-                } catch (IOException | NoSuchAlgorithmException exception) {
-                    failures.add(exception);
-                } finally {
-                    progress.itemCompleted();
                 }
+            } catch (NoSuchAlgorithmException exception) {
+                failures.add(exception);
             }
         });
         awaitWorkers(workers);
@@ -232,25 +254,37 @@ public class FileHelper {
         return fullHashCandidates;
     }
 
-    private ConcurrentMap<HashKey, ConcurrentLinkedQueue<Path>> groupFilesByHash(
-            ConcurrentLinkedQueue<SizedPath> candidates,
+    private ConcurrentMap<HashKey, ConcurrentLinkedQueue<FileMetadata>> groupFilesByHash(
+            ConcurrentLinkedQueue<FileMetadata> candidates,
             ExecutorService executor
     ) throws IOException, NoSuchAlgorithmException {
         progress.begin(ScanProgress.Stage.HASHING, candidates.size());
 
-        ConcurrentMap<HashKey, ConcurrentLinkedQueue<Path>> filesByHash = new ConcurrentHashMap<>();
+        ConcurrentMap<HashKey, ConcurrentLinkedQueue<FileMetadata>> filesByHash = new ConcurrentHashMap<>();
         ConcurrentLinkedQueue<Exception> failures = new ConcurrentLinkedQueue<>();
-        List<Future<?>> workers = startWorkers(executor, () -> {
-            SizedPath candidate;
-            while (failures.isEmpty() && (candidate = candidates.poll()) != null) {
-                try {
-                    HashKey key = new HashKey(candidate.size(), getSHAHashForFile(candidate.path()));
-                    filesByHash.computeIfAbsent(key, ignored -> new ConcurrentLinkedQueue<>()).add(candidate.path());
-                } catch (IOException | NoSuchAlgorithmException exception) {
-                    failures.add(exception);
-                } finally {
-                    progress.itemCompleted();
+        List<Future<?>> workers = startWorkers(executor, scanProfile.hashingWorkers(), () -> {
+            try {
+                MessageDigest digest = MessageDigest.getInstance("SHA-256");
+                byte[] buffer = new byte[scanProfile.hashBufferSize()];
+                FileMetadata candidate;
+                while (failures.isEmpty() && (candidate = candidates.poll()) != null) {
+                    try {
+                        ensureMetadataUnchanged(candidate);
+                        String hash = hashCache.find(candidate);
+                        if (hash == null) {
+                            hash = getSHAHashForFile(candidate.path(), digest, buffer);
+                            hashCache.put(candidate, hash);
+                        }
+                        HashKey key = new HashKey(candidate.size(), hash);
+                        filesByHash.computeIfAbsent(key, ignored -> new ConcurrentLinkedQueue<>()).add(candidate);
+                    } catch (IOException exception) {
+                        failures.add(exception);
+                    } finally {
+                        progress.itemCompleted();
+                    }
                 }
+            } catch (NoSuchAlgorithmException exception) {
+                failures.add(exception);
             }
         });
         awaitWorkers(workers);
@@ -258,20 +292,36 @@ public class FileHelper {
         return filesByHash;
     }
 
-    private static String getSampledFingerprint(Path file, long expectedSize)
-            throws IOException, NoSuchAlgorithmException {
-        MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
-            if (channel.size() != expectedSize) {
-                throw new IOException("File size changed while scanning: " + file);
+    private static String getSampledFingerprint(
+            FileMetadata file,
+            MessageDigest digest,
+            ByteBuffer sample
+    ) throws IOException {
+        digest.reset();
+        try (FileChannel channel = FileChannel.open(file.path(), StandardOpenOption.READ)) {
+            if (channel.size() != file.size()) {
+                throw new IOException("File size changed while scanning: " + file.path());
             }
-            ByteBuffer sample = ByteBuffer.allocate(FINGERPRINT_SAMPLE_SIZE);
-            long middle = (expectedSize - FINGERPRINT_SAMPLE_SIZE) / 2;
+            long middle = (file.size() - FINGERPRINT_SAMPLE_SIZE) / 2;
             updateDigestFromPosition(channel, digest, sample, 0);
             updateDigestFromPosition(channel, digest, sample, middle);
-            updateDigestFromPosition(channel, digest, sample, expectedSize - FINGERPRINT_SAMPLE_SIZE);
+            updateDigestFromPosition(channel, digest, sample, file.size() - FINGERPRINT_SAMPLE_SIZE);
         }
         return HexFormat.of().formatHex(digest.digest());
+    }
+
+    private static void ensureMetadataUnchanged(FileMetadata metadata) throws IOException {
+        BasicFileAttributes current = Files.readAttributes(
+                metadata.path(),
+                BasicFileAttributes.class,
+                LinkOption.NOFOLLOW_LINKS
+        );
+        if (!current.isRegularFile()
+                || current.size() != metadata.size()
+                || !current.creationTime().equals(metadata.creationTime())
+                || !current.lastModifiedTime().equals(metadata.lastModifiedTime())) {
+            throw new IOException("File changed while scanning: " + metadata.path());
+        }
     }
 
     private static void updateDigestFromPosition(
@@ -317,7 +367,7 @@ public class FileHelper {
             Path directory,
             LinkedBlockingQueue<Path> directories,
             Set<Path> visitedDirectories,
-            Set<Path> mediaFiles,
+            ConcurrentMap<Path, FileMetadata> mediaFiles,
             Phaser pendingDirectories,
             ScanProgress progress
     ) {
@@ -332,7 +382,14 @@ public class FileHelper {
                     if (attributes.isDirectory()) {
                         enqueueDirectory(entry, directories, visitedDirectories, pendingDirectories);
                     } else if (attributes.isRegularFile() && isSupportedMedia(entry)) {
-                        if (mediaFiles.add(entry.toAbsolutePath().normalize())) {
+                        Path normalized = entry.toAbsolutePath().normalize();
+                        FileMetadata metadata = new FileMetadata(
+                                normalized,
+                                attributes.size(),
+                                attributes.creationTime(),
+                                attributes.lastModifiedTime()
+                        );
+                        if (mediaFiles.putIfAbsent(normalized, metadata) == null) {
                             progress.mediaFileDiscovered();
                         }
                     }
@@ -354,9 +411,9 @@ public class FileHelper {
         }
     }
 
-    private static List<Future<?>> startWorkers(ExecutorService executor, Runnable worker) {
-        List<Future<?>> workers = new ArrayList<>(MAX_CONCURRENT_FILE_OPERATIONS);
-        for (int index = 0; index < MAX_CONCURRENT_FILE_OPERATIONS; index++) {
+    private static List<Future<?>> startWorkers(ExecutorService executor, int workerCount, Runnable worker) {
+        List<Future<?>> workers = new ArrayList<>(workerCount);
+        for (int index = 0; index < workerCount; index++) {
             workers.add(executor.submit(worker));
         }
         return workers;
@@ -386,28 +443,122 @@ public class FileHelper {
         return ALLOWED_EXTENSIONS.contains(filename.substring(extensionSeparator + 1).toLowerCase(Locale.ROOT));
     }
 
-    private FileTime creationTime(Path path) {
-        try {
-            return Files.readAttributes(path, BasicFileAttributes.class).creationTime();
-        } catch (IOException exception) {
-            return FileTime.fromMillis(Long.MAX_VALUE);
+    private static final class HashCache {
+        private final Path path;
+        private final ConcurrentMap<String, CachedHash> entries = new ConcurrentHashMap<>();
+
+        private HashCache(Path path) {
+            this.path = path == null ? null : path.toAbsolutePath().normalize();
+        }
+
+        private void load(ScanProgress progress) {
+            if (path == null || !Files.isRegularFile(path)) {
+                return;
+            }
+            Properties properties = new Properties();
+            try (InputStream input = Files.newInputStream(path)) {
+                properties.load(input);
+                for (String filePath : properties.stringPropertyNames()) {
+                    String[] fields = properties.getProperty(filePath).split(",", 4);
+                    if (fields.length == 4) {
+                        entries.put(filePath, new CachedHash(
+                                Long.parseLong(fields[0]),
+                                Long.parseLong(fields[1]),
+                                Long.parseLong(fields[2]),
+                                fields[3]
+                        ));
+                    }
+                }
+            } catch (IOException | RuntimeException exception) {
+                entries.clear();
+                progress.warning("Ignoring unreadable hash cache [%s]: %s".formatted(path, exception.getMessage()));
+            }
+        }
+
+        private String find(FileMetadata metadata) {
+            CachedHash cached = entries.get(metadata.path().toString());
+            if (cached == null
+                    || cached.size() != metadata.size()
+                    || cached.creationMillis() != metadata.creationTime().toMillis()
+                    || cached.modifiedMillis() != metadata.lastModifiedTime().toMillis()) {
+                return null;
+            }
+            return cached.hash();
+        }
+
+        private void put(FileMetadata metadata, String hash) {
+            entries.put(metadata.path().toString(), new CachedHash(
+                    metadata.size(),
+                    metadata.creationTime().toMillis(),
+                    metadata.lastModifiedTime().toMillis(),
+                    hash
+            ));
+        }
+
+        private void save(ScanProgress progress) {
+            if (path == null) {
+                return;
+            }
+            Path temporary = null;
+            try {
+                Path parent = path.getParent();
+                Files.createDirectories(parent);
+                temporary = Files.createTempFile(parent, "hash-cache-", ".tmp");
+                Properties properties = new Properties();
+                entries.forEach((filePath, cached) -> properties.setProperty(
+                        filePath,
+                        "%d,%d,%d,%s".formatted(
+                                cached.size(),
+                                cached.creationMillis(),
+                                cached.modifiedMillis(),
+                                cached.hash()
+                        )
+                ));
+                try (OutputStream output = Files.newOutputStream(temporary)) {
+                    properties.store(output, "Duplicate File Remover SHA-256 cache");
+                }
+                try {
+                    Files.move(temporary, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                } catch (AtomicMoveNotSupportedException exception) {
+                    Files.move(temporary, path, StandardCopyOption.REPLACE_EXISTING);
+                }
+                temporary = null;
+            } catch (IOException exception) {
+                progress.warning("Could not update hash cache [%s]: %s".formatted(path, exception.getMessage()));
+            } finally {
+                if (temporary != null) {
+                    try {
+                        Files.deleteIfExists(temporary);
+                    } catch (IOException ignored) {
+                        // A failed cache cleanup must not fail the scan.
+                    }
+                }
+            }
         }
     }
 
-    private FileTime lastModifiedTime(Path path) {
-        try {
-            return Files.getLastModifiedTime(path);
-        } catch (IOException exception) {
-            return FileTime.fromMillis(Long.MAX_VALUE);
-        }
+    public record ScanProfile(
+            int traversalWorkers,
+            int samplingWorkers,
+            int hashingWorkers,
+            int hashBufferSize
+    ) {
     }
 
-    private record SizedPath(long size, Path path) {
+    private record FileMetadata(
+            Path path,
+            long size,
+            FileTime creationTime,
+            FileTime lastModifiedTime
+    ) {
     }
 
     private record HashKey(long size, String hash) {
     }
 
     private record QuickHashKey(long size, String hash) {
+    }
+
+    private record CachedHash(long size, long creationMillis, long modifiedMillis, String hash) {
     }
 }

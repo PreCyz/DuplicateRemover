@@ -3,10 +3,12 @@ package pg.duplicatefileremover;
 import org.junit.jupiter.api.*;
 import pg.duplicatefileremover.helpers.FileHelper;
 
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.LocalTime;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /** @author premik */
@@ -30,9 +32,44 @@ public class DuplicateFileRemoverTest {
 
     @Test
     void reportsTheConfiguredScanConcurrency() {
-        assertThat(DuplicateFileRemover.scanConcurrencyInfo())
-                .isEqualTo("Using up to %d simultaneous virtual threads for file scanning."
-                        .formatted(FileHelper.concurrentWorkerCount()));
+        FileHelper.ScanProfile profile = FileHelper.scanProfile(DiskType.HDD);
+
+        assertThat(DuplicateFileRemover.scanConcurrencyInfo(DiskType.HDD))
+                .isEqualTo("Disk type: HDD. Using up to %d traversal, %d sampling, and %d hashing virtual threads."
+                        .formatted(
+                                profile.traversalWorkers(),
+                                profile.samplingWorkers(),
+                                profile.hashingWorkers()
+                        ));
+    }
+
+    @Test
+    void defaultsToHddAndTreatsRemainingArgumentsAsRoots() {
+        DuplicateFileRemover.ApplicationArguments arguments = DuplicateFileRemover.parseArguments(
+                new String[]{"first", "second"}
+        );
+
+        assertThat(arguments.diskType()).isEqualTo(DiskType.HDD);
+        assertThat(arguments.roots()).containsExactly(Path.of("first"), Path.of("second"));
+    }
+
+    @Test
+    void acceptsBothDiskArgumentForms() {
+        assertThat(DuplicateFileRemover.parseArguments(new String[]{"--disk=NVMe", "photos"}).diskType())
+                .isEqualTo(DiskType.NVME);
+        assertThat(DuplicateFileRemover.parseArguments(new String[]{"--disk", "hdd", "photos"}).diskType())
+                .isEqualTo(DiskType.HDD);
+    }
+
+    @Test
+    void rejectsUnsupportedOrRepeatedDiskArguments() {
+        assertThatThrownBy(() -> DuplicateFileRemover.parseArguments(new String[]{"--disk=SSD", "photos"}))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("expected HDD or NVMe");
+        assertThatThrownBy(() -> DuplicateFileRemover.parseArguments(
+                new String[]{"--disk=HDD", "--disk=NVMe", "photos"}
+        )).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("only once");
     }
 
     @Test
@@ -43,7 +80,7 @@ public class DuplicateFileRemoverTest {
 
     @Test
     public void givenStartAndEnd_whenGetDuration_thenReturnProperlyFormattedString() {
-        LocalTime start = LocalTime.now();
+        LocalTime start = LocalTime.of(10, 0);
         Duration hours = Duration.ofHours(1);
         LocalTime stop = start.plus(hours);
 

@@ -2,6 +2,7 @@ package pg.duplicatefileremover.helpers;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import pg.duplicatefileremover.DiskType;
 import pg.duplicatefileremover.TestBase;
 
 import java.io.File;
@@ -16,6 +17,19 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class FileHelperTest extends TestBase {
+
+    @Test
+    void selectsStorageSpecificConcurrencyAndBufferProfiles() {
+        FileHelper.ScanProfile hdd = FileHelper.scanProfile(DiskType.HDD);
+        FileHelper.ScanProfile nvme = FileHelper.scanProfile(DiskType.NVME);
+
+        assertThat(hdd.traversalWorkers()).isEqualTo(2);
+        assertThat(hdd.samplingWorkers()).isEqualTo(1);
+        assertThat(hdd.hashingWorkers()).isEqualTo(1);
+        assertThat(nvme.samplingWorkers()).isGreaterThan(hdd.samplingWorkers());
+        assertThat(nvme.hashingWorkers()).isGreaterThan(hdd.hashingWorkers());
+        assertThat(nvme.hashBufferSize()).isGreaterThan(hdd.hashBufferSize());
+    }
 
     @Test
     void listsOnlySupportedMediaFiles(@TempDir Path tempDir) throws IOException {
@@ -125,6 +139,35 @@ class FileHelperTest extends TestBase {
     }
 
     @Test
+    void persistentHashCacheIsInvalidatedWhenFileMetadataChanges(@TempDir Path tempDir) throws Exception {
+        Path original = Files.writeString(tempDir.resolve("original.jpg"), "same");
+        Path duplicate = Files.writeString(tempDir.resolve("duplicate.jpg"), "same");
+        Path cache = tempDir.resolve("cache").resolve("hashes.properties");
+
+        ScanResult firstScan = new FileHelper(
+                List.of(tempDir),
+                new ScanProgress(),
+                DiskType.HDD,
+                cache
+        ).scan();
+        assertThat(firstScan.duplicateCount()).isEqualTo(1);
+        assertThat(cache).exists();
+
+        Files.writeString(duplicate, "diff");
+        Files.setLastModifiedTime(duplicate, FileTime.fromMillis(System.currentTimeMillis() + 2_000));
+        ScanResult secondScan = new FileHelper(
+                List.of(tempDir),
+                new ScanProgress(),
+                DiskType.HDD,
+                cache
+        ).scan();
+
+        assertThat(secondScan.duplicateGroups()).isEmpty();
+        assertThat(original).exists();
+        assertThat(duplicate).exists();
+    }
+
+    @Test
     void scanRejectsNonDirectory(@TempDir Path tempDir) throws IOException {
         Path file = Files.writeString(tempDir.resolve("image.jpg"), "content");
         ScanProgress progress = new ScanProgress();
@@ -165,13 +208,13 @@ class FileHelperTest extends TestBase {
                 .extracting(ScanProgress.Snapshot::stage)
                 .containsSubsequence(
                         ScanProgress.Stage.DISCOVERING,
-                        ScanProgress.Stage.READING_METADATA,
+                        ScanProgress.Stage.GROUPING_BY_SIZE,
                         ScanProgress.Stage.SAMPLING,
                         ScanProgress.Stage.HASHING,
                         ScanProgress.Stage.FINALIZING,
                         ScanProgress.Stage.COMPLETE
                 );
-        assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.READING_METADATA)
+        assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.GROUPING_BY_SIZE)
                 .allSatisfy(update -> assertThat(update.total()).isEqualTo(2));
         assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.SAMPLING)
                 .allSatisfy(update -> assertThat(update.total()).isEqualTo(2));
@@ -180,7 +223,7 @@ class FileHelperTest extends TestBase {
         assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.FINALIZING)
                 .allSatisfy(update -> assertThat(update.total()).isEqualTo(1));
         for (ScanProgress.Stage stage : List.of(
-                ScanProgress.Stage.READING_METADATA,
+                ScanProgress.Stage.GROUPING_BY_SIZE,
                 ScanProgress.Stage.SAMPLING,
                 ScanProgress.Stage.HASHING,
                 ScanProgress.Stage.FINALIZING

@@ -25,21 +25,21 @@ The executable JAR is created at `target/DuplicateFileRemover-1.0-SNAPSHOT.jar`.
 
 ## Run
 
-Pass one or more directories to scan. Quote paths that contain spaces:
+Pass one or more directories to scan. Use `--disk=HDD` or `--disk=NVMe` to select a storage profile; HDD is the default. The separated form `--disk NVMe` is also accepted. Quote paths that contain spaces:
 
 ```powershell
-java -jar target/DuplicateFileRemover-1.0-SNAPSHOT.jar "D:\Photos" "E:\Videos"
+java -jar target/DuplicateFileRemover-1.0-SNAPSHOT.jar --disk=NVMe "D:\Photos" "E:\Videos"
 ```
 
 On Windows, the bundled launcher accepts the same directory arguments:
 
 ```powershell
-.\run.bat "D:\Photos" "E:\Videos"
+.\run.bat --disk=NVMe "D:\Photos" "E:\Videos"
 ```
 
 The application:
 
-1. Recursively scans supported media files.
+1. Recursively scans supported media files using disk-specific traversal, sampling, hashing, and buffer settings.
 2. Writes `reports/duplicates-report.html`.
 3. Starts a loopback-only report server and attempts to open the report in your browser.
 4. Keeps the local report server running until you close all report tabs or press Enter in the terminal.
@@ -47,6 +47,8 @@ The application:
 Keep the terminal window open while using **Remove** or **Remove All Duplicates**. The browser buttons call the local server, which accepts deletion only for files verified as duplicates during this scan. Before deletion, the application verifies that the file still has the same size and SHA-256 hash. Files changed after scanning are preserved. After the last report tab closes, the server stops automatically following a short grace period; pressing Enter remains available as an immediate fallback.
 
 If the browser does not open automatically, copy the `http://127.0.0.1:...` URL printed in the terminal. Opening the saved HTML file directly still requires the application and its local report server to be running for previews and removal actions.
+
+Full SHA-256 results are cached in `reports/hash-cache.properties` and reused only while a file's normalized path, size, creation time, and modification time still match. The cache location can be overridden with the `duplicate.hash.cache.path` system property. Files are always rehashed immediately before deletion.
 
 ## Supported media extensions
 

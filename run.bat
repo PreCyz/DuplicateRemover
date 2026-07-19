@@ -2,7 +2,7 @@
 setlocal
 
 if "%~1"=="" (
-    echo Usage: run.bat "C:\path\to\media" ["D:\another\path"]
+    echo Usage: run.bat [--disk=HDD^|NVMe] "C:\path\to\media" ["D:\another\path"]
     exit /b 1
 )
 
