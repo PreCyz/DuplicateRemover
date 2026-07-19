@@ -97,6 +97,36 @@
         const progressText = document.getElementById('remove-progress-text');
         const completionToast = document.getElementById('completion-toast');
         const completionToastMessage = document.getElementById('completion-toast-message');
+        const sessionId = typeof crypto.randomUUID === 'function'
+            ? crypto.randomUUID()
+            : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+        const heartbeatUrl = `${apiBase}/api/session/heartbeat?token=${encodeURIComponent(apiToken)}`;
+        const closeSessionUrl = `${apiBase}/api/session/close?token=${encodeURIComponent(apiToken)}`;
+        let heartbeatTimer = null;
+
+        const sendHeartbeat = () => fetch(heartbeatUrl, {
+            method: 'POST',
+            body: sessionId,
+            keepalive: true
+        }).catch(() => {});
+
+        const startBrowserSession = () => {
+            if (heartbeatTimer !== null) return;
+            sendHeartbeat();
+            heartbeatTimer = window.setInterval(sendHeartbeat, 3000);
+        };
+
+        const closeBrowserSession = () => {
+            if (heartbeatTimer !== null) {
+                window.clearInterval(heartbeatTimer);
+                heartbeatTimer = null;
+            }
+            navigator.sendBeacon(closeSessionUrl, sessionId);
+        };
+
+        window.addEventListener('pageshow', startBrowserSession);
+        window.addEventListener('pagehide', closeBrowserSession);
+        startBrowserSession();
 
         const formatBytes = bytes => {
             if (bytes < 1024) return `${bytes} B`;

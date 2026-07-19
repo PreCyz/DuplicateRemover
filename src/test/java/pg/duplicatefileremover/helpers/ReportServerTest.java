@@ -9,6 +9,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -103,5 +105,54 @@ class ReportServerTest {
             assertThat(firstDuplicate).doesNotExist();
             assertThat(secondDuplicate).doesNotExist();
         }
+    }
+
+    @Test
+    void signalsShutdownAfterTheLastBrowserSessionCloses(@TempDir Path tempDir) throws Exception {
+        ScanResult result = new ScanResult(0, List.of(), Duration.ZERO);
+        Path report = Files.writeString(tempDir.resolve("report.html"), "<html>report</html>");
+
+        try (ReportServer server = new ReportServer(result, report, Duration.ofMillis(100));
+             HttpClient client = HttpClient.newHttpClient()) {
+            server.start();
+            CompletableFuture<Void> browserExit = server.browserSessionsEnded().toCompletableFuture();
+
+            assertThat(postSession(client, server, "heartbeat", "first-session").statusCode()).isEqualTo(204);
+            assertThat(postSession(client, server, "heartbeat", "second-session").statusCode()).isEqualTo(204);
+            assertThat(postSession(client, server, "close", "first-session").statusCode()).isEqualTo(204);
+            assertThat(browserExit.isDone()).isFalse();
+
+            assertThat(postSession(client, server, "close", "second-session").statusCode()).isEqualTo(204);
+            browserExit.get(2, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void signalsShutdownWhenBrowserHeartbeatExpires(@TempDir Path tempDir) throws Exception {
+        ScanResult result = new ScanResult(0, List.of(), Duration.ZERO);
+        Path report = Files.writeString(tempDir.resolve("report.html"), "<html>report</html>");
+
+        try (ReportServer server = new ReportServer(result, report, Duration.ofMillis(100));
+             HttpClient client = HttpClient.newHttpClient()) {
+            server.start();
+
+            assertThat(postSession(client, server, "heartbeat", "abandoned-session").statusCode()).isEqualTo(204);
+            server.browserSessionsEnded().toCompletableFuture().get(2, TimeUnit.SECONDS);
+        }
+    }
+
+    private static HttpResponse<Void> postSession(
+            HttpClient client,
+            ReportServer server,
+            String action,
+            String sessionId
+    ) throws Exception {
+        URI uri = URI.create(server.apiBase() + "/api/session/" + action + "?token=" + server.apiToken());
+        return client.send(
+                HttpRequest.newBuilder(uri)
+                        .POST(HttpRequest.BodyPublishers.ofString(sessionId))
+                        .build(),
+                HttpResponse.BodyHandlers.discarding()
+        );
     }
 }

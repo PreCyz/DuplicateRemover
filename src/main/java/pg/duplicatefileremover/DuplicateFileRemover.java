@@ -11,6 +11,8 @@ import java.time.Duration;
 import java.time.LocalTime;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 
 public class DuplicateFileRemover {
     private static final Path REPORT_PATH = Path.of(System.getProperty(
@@ -48,7 +50,7 @@ public class DuplicateFileRemover {
                 System.out.printf("Report written to [%s].%n", report);
                 System.out.printf("Open [%s] to review or remove duplicates.%n", server.reportUri());
                 openBrowser(server);
-                waitForExit();
+                waitForExit(server);
             }
         } catch (IllegalArgumentException | UnsupportedOperationException | IOException | NoSuchAlgorithmException exception) {
             System.err.println("Duplicate scan failed: " + exception.getMessage());
@@ -87,8 +89,31 @@ public class DuplicateFileRemover {
         }
     }
 
-    private static void waitForExit() throws IOException {
-        IO.println("Keep this window open while using Remove buttons. Press Enter to stop the report server.");
-        new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8)).readLine();
+    private static void waitForExit(ReportServer server) throws IOException {
+        IO.println("Keep this window open while using Remove buttons.");
+        IO.println("Close all report tabs or press Enter to stop the report server.");
+
+        CompletableFuture<Void> terminalExit = new CompletableFuture<>();
+        Thread.ofVirtual().name("terminal-exit-waiter").start(() -> {
+            try {
+                new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8)).readLine();
+                terminalExit.complete(null);
+            } catch (IOException exception) {
+                terminalExit.completeExceptionally(exception);
+            }
+        });
+
+        CompletableFuture<Void> browserExit = server.browserSessionsEnded().toCompletableFuture();
+        try {
+            CompletableFuture.anyOf(terminalExit, browserExit).join();
+        } catch (CompletionException exception) {
+            if (exception.getCause() instanceof IOException ioException) {
+                throw ioException;
+            }
+            throw exception;
+        }
+        if (browserExit.isDone() && !terminalExit.isDone()) {
+            IO.println("All report tabs closed; stopping the report server.");
+        }
     }
 }

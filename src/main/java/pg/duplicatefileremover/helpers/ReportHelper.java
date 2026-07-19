@@ -7,6 +7,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Locale;
+import java.util.StringJoiner;
 
 public class ReportHelper {
     private static final String TEMPLATE_RESOURCE = "/reportTemplate.html";
@@ -126,7 +127,20 @@ public class ReportHelper {
         long minutes = duration.toMinutesPart();
         long seconds = duration.toSecondsPart();
         long millis = duration.toMillisPart();
-        return String.format(Locale.ROOT, "%02dh %02dm %02ds %03dms", hours, minutes, seconds, millis);
+        StringJoiner formatted = new StringJoiner(" ");
+        if (hours != 0) {
+            formatted.add(String.format(Locale.ROOT, "%02dh", hours));
+        }
+        if (minutes != 0) {
+            formatted.add(String.format(Locale.ROOT, "%02dm", minutes));
+        }
+        if (seconds != 0) {
+            formatted.add(String.format(Locale.ROOT, "%02ds", seconds));
+        }
+        if (millis != 0) {
+            formatted.add(String.format(Locale.ROOT, "%03dms", millis));
+        }
+        return formatted.length() == 0 ? "0ms" : formatted.toString();
     }
 
     private static boolean isVideo(Path path) {

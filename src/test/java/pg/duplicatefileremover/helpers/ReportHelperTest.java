@@ -45,7 +45,11 @@ class ReportHelperTest {
                 .contains("duplicate.jpg")
                 .contains("http://127.0.0.1:12345/media/")
                 .contains("const apiToken = 'test-token'")
-                .contains("00h 00m 01s 250ms");
+                .contains("/api/session/heartbeat")
+                .contains("/api/session/close")
+                .contains("navigator.sendBeacon")
+                .contains("window.addEventListener('pagehide'")
+                .contains("01s 250ms");
     }
 
     @Test
@@ -58,6 +62,22 @@ class ReportHelperTest {
         assertThat(Files.readString(report))
                 .contains("No duplicate media files found")
                 .contains("data-bytes=\"0\"");
+    }
+
+    @Test
+    void formatsDurationWithoutZeroValuedUnits() {
+        assertThat(ReportHelper.formatDuration(Duration.ofHours(1).plusSeconds(2)))
+                .isEqualTo("01h 02s");
+        assertThat(ReportHelper.formatDuration(Duration.ofMinutes(7).plusSeconds(16).plusMillis(285)))
+                .isEqualTo("07m 16s 285ms");
+        assertThat(ReportHelper.formatDuration(Duration.ofSeconds(16).plusMillis(285)))
+                .isEqualTo("16s 285ms");
+        assertThat(ReportHelper.formatDuration(Duration.ofMinutes(7).plusMillis(285)))
+                .isEqualTo("07m 285ms");
+        assertThat(ReportHelper.formatDuration(Duration.ofSeconds(16)))
+                .isEqualTo("16s");
+        assertThat(ReportHelper.formatDuration(Duration.ZERO))
+                .isEqualTo("0ms");
     }
 
     private record TestLinks(Path duplicate) implements ReportHelper.ReportLinks {
