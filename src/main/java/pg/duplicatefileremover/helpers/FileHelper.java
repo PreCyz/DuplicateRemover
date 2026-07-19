@@ -82,6 +82,10 @@ public class FileHelper {
         }
     }
 
+    public static int concurrentWorkerCount() {
+        return MAX_CONCURRENT_FILE_OPERATIONS;
+    }
+
     protected List<File> getFileOnlyList() {
         if (roots.size() != 1 || !Files.isDirectory(roots.getFirst())) {
             return List.of();

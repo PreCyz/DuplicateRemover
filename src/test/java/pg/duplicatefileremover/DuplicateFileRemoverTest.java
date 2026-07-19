@@ -1,6 +1,7 @@
 package pg.duplicatefileremover;
 
 import org.junit.jupiter.api.*;
+import pg.duplicatefileremover.helpers.FileHelper;
 
 import java.time.Duration;
 import java.time.LocalTime;
@@ -25,6 +26,13 @@ public class DuplicateFileRemoverTest {
     @Test
     public void testGetHelper() {
         assertThat(dfr.getHelper()).isNotNull();
+    }
+
+    @Test
+    void reportsTheConfiguredScanConcurrency() {
+        assertThat(DuplicateFileRemover.scanConcurrencyInfo())
+                .isEqualTo("Using up to %d simultaneous virtual threads for file scanning."
+                        .formatted(FileHelper.concurrentWorkerCount()));
     }
 
     @Test

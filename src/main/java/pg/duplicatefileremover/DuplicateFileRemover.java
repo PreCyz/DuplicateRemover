@@ -33,6 +33,7 @@ public class DuplicateFileRemover {
     public static void main(String[] args) {
         try {
             validateArgs(args);
+            IO.println(scanConcurrencyInfo());
             List<Path> roots = Arrays.stream(args).map(Path::of).toList();
             ScanProgress progress = new ScanProgress();
             ScanResult result;
@@ -65,6 +66,11 @@ public class DuplicateFileRemover {
                 duration.toSecondsPart(),
                 duration.toMillisPart()
         );
+    }
+
+    static String scanConcurrencyInfo() {
+        return "Using up to %d simultaneous virtual threads for file scanning."
+                .formatted(FileHelper.concurrentWorkerCount());
     }
 
     protected static void validateArgs(String[] args) {
