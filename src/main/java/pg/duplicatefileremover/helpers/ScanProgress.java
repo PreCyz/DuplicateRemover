@@ -1,10 +1,12 @@
 package pg.duplicatefileremover.helpers;
 
-import java.util.Objects;
+import java.time.Duration;
+import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 
 public final class ScanProgress {
     private final AtomicReference<Stage> stage = new AtomicReference<>(Stage.NOT_STARTED);
@@ -14,6 +16,9 @@ public final class ScanProgress {
     private final AtomicLong mediaFilesDiscovered = new AtomicLong();
     private final AtomicReference<Consumer<String>> warningHandler = new AtomicReference<>(System.err::println);
     private final CopyOnWriteArrayList<Consumer<Snapshot>> listeners = new CopyOnWriteArrayList<>();
+    private final EnumMap<Stage, Duration> stageDurations = new EnumMap<>(Stage.class);
+    private final LongSupplier nanoTime;
+    private long stageStartedNanos;
 
     public ScanProgress() {
         this(ignored -> {
@@ -21,7 +26,13 @@ public final class ScanProgress {
     }
 
     public ScanProgress(Consumer<Snapshot> listener) {
+        this(listener, System::nanoTime);
+    }
+
+    ScanProgress(Consumer<Snapshot> listener, LongSupplier nanoTime) {
         listeners.add(Objects.requireNonNull(listener, "listener"));
+        this.nanoTime = Objects.requireNonNull(nanoTime, "nanoTime");
+        stageStartedNanos = nanoTime.getAsLong();
     }
 
     public Snapshot snapshot() {
@@ -34,10 +45,10 @@ public final class ScanProgress {
         );
     }
 
-    void begin(Stage nextStage, long stageTotal) {
+    synchronized void begin(Stage nextStage, long stageTotal) {
         completed.set(0);
         total.set(Math.max(0, stageTotal));
-        stage.set(nextStage);
+        transitionTo(nextStage);
         publish();
     }
 
@@ -56,15 +67,19 @@ public final class ScanProgress {
         publish();
     }
 
-    void complete() {
+    synchronized void complete() {
         completed.set(total.get());
-        stage.set(Stage.COMPLETE);
+        transitionTo(Stage.COMPLETE);
         publish();
     }
 
-    void failed() {
-        stage.set(Stage.FAILED);
+    synchronized void failed() {
+        transitionTo(Stage.FAILED);
         publish();
+    }
+
+    synchronized Map<Stage, Duration> stageDurations() {
+        return Collections.unmodifiableMap(new EnumMap<>(stageDurations));
     }
 
     void warning(String message) {
@@ -96,6 +111,23 @@ public final class ScanProgress {
                 // Progress observers must never abort a scan.
             }
         }
+    }
+
+    private void transitionTo(Stage nextStage) {
+        long transitionNanos = nanoTime.getAsLong();
+        Stage previousStage = stage.get();
+        if (isWorkStage(previousStage)) {
+            stageDurations.put(
+                    previousStage,
+                    Duration.ofNanos(Math.max(0, transitionNanos - stageStartedNanos))
+            );
+        }
+        stageStartedNanos = transitionNanos;
+        stage.set(nextStage);
+    }
+
+    private static boolean isWorkStage(Stage stage) {
+        return stage != Stage.NOT_STARTED && stage != Stage.COMPLETE && stage != Stage.FAILED;
     }
 
     public enum Stage {

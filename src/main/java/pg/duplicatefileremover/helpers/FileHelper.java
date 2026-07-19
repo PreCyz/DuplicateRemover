@@ -96,7 +96,12 @@ public class FileHelper {
             duplicateGroups.sort(Comparator.comparing(group -> group.original().toString()));
             long scannedFiles = filesBySize.values().stream().mapToLong(List::size).sum();
             progress.complete();
-            return new ScanResult(scannedFiles, duplicateGroups, Duration.ofNanos(System.nanoTime() - startNanos));
+            return new ScanResult(
+                    scannedFiles,
+                    duplicateGroups,
+                    Duration.ofNanos(System.nanoTime() - startNanos),
+                    progress.stageDurations()
+            );
         } catch (IOException | NoSuchAlgorithmException | RuntimeException exception) {
             progress.failed();
             throw exception;

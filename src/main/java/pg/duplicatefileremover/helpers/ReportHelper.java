@@ -6,11 +6,17 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.util.Locale;
-import java.util.StringJoiner;
+import java.util.*;
 
 public class ReportHelper {
     private static final String TEMPLATE_RESOURCE = "/reportTemplate.html";
+    private static final List<ScanProgress.Stage> REPORTED_STAGES = List.of(
+            ScanProgress.Stage.DISCOVERING,
+            ScanProgress.Stage.GROUPING_BY_SIZE,
+            ScanProgress.Stage.SAMPLING,
+            ScanProgress.Stage.HASHING,
+            ScanProgress.Stage.FINALIZING
+    );
 
     private final ScanResult scanResult;
     private final Path reportPath;
@@ -38,6 +44,7 @@ public class ReportHelper {
                 .replace("${duplicateBytesRaw}", Long.toString(scanResult.duplicateBytes()))
                 .replace("${duplicateBytes}", escapeHtml(formatBytes(scanResult.duplicateBytes())))
                 .replace("${scanDuration}", escapeHtml(formatDuration(scanResult.duration())))
+                .replace("${scanStepsSummary}", createScanStepsSummary())
                 .replace("${duplicatesContent}", createTableContent())
                 .replace("${apiBase}", escapeJavaScript(links.apiBase()))
                 .replace("${apiToken}", escapeJavaScript(links.apiToken()))
@@ -49,6 +56,38 @@ public class ReportHelper {
         }
         Files.writeString(reportPath, report, StandardCharsets.UTF_8);
         return reportPath;
+    }
+
+    private String createScanStepsSummary() {
+        StringBuilder cards = new StringBuilder();
+        for (ScanProgress.Stage stage : REPORTED_STAGES) {
+            Duration duration = scanResult.stageDurations().get(stage);
+            if (duration == null) {
+                continue;
+            }
+            cards.append("<div class=\"col-6 col-md-4 col-xl\"><div class=\"card summary-card h-100\"><div class=\"card-body\"><div class=\"text-secondary small text-uppercase\">")
+                    .append(stageLabel(stage))
+                    .append("</div><div class=\"summary-value\">")
+                    .append(escapeHtml(formatDuration(duration)))
+                    .append("</div></div></div></div>");
+        }
+        if (cards.isEmpty()) {
+            return "";
+        }
+        return "<section class=\"mb-4\" aria-labelledby=\"scan-steps-title\">"
+                + "<h2 id=\"scan-steps-title\" class=\"h5 mb-3\">Scan steps</h2>"
+                + "<div class=\"row g-3\">" + cards + "</div></section>";
+    }
+
+    private static String stageLabel(ScanProgress.Stage stage) {
+        return switch (stage) {
+            case DISCOVERING -> "Discovering files";
+            case GROUPING_BY_SIZE -> "Grouping by size";
+            case SAMPLING -> "Sampling content";
+            case HASHING -> "Hashing files";
+            case FINALIZING -> "Finalizing results";
+            default -> throw new IllegalArgumentException("Unsupported report stage: " + stage);
+        };
     }
 
     private String createTableContent() {

@@ -8,6 +8,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -20,7 +21,14 @@ class ReportHelperTest {
         ScanResult result = new ScanResult(
                 7,
                 List.of(new DuplicateGroup("abc123", 4, original, List.of(duplicate))),
-                Duration.ofMillis(1250)
+                Duration.ofMillis(1250),
+                Map.of(
+                        ScanProgress.Stage.DISCOVERING, Duration.ofMillis(125),
+                        ScanProgress.Stage.GROUPING_BY_SIZE, Duration.ofMillis(250),
+                        ScanProgress.Stage.SAMPLING, Duration.ofSeconds(1),
+                        ScanProgress.Stage.HASHING, Duration.ofSeconds(2).plusMillis(375),
+                        ScanProgress.Stage.FINALIZING, Duration.ZERO
+                )
         );
         Path report = tempDir.resolve("reports").resolve("duplicates.html");
 
@@ -52,7 +60,16 @@ class ReportHelperTest {
                 .contains("/api/session/close")
                 .contains("navigator.sendBeacon")
                 .contains("window.addEventListener('pagehide'")
-                .contains("01s 250ms");
+                .contains("01s 250ms")
+                .contains("Scan steps")
+                .contains("Discovering files", "125ms")
+                .contains("Grouping by size", "250ms")
+                .contains("Sampling content", "01s")
+                .contains("Hashing files", "02s 375ms")
+                .contains("Finalizing results", "0ms");
+
+        String html = Files.readString(report);
+        assertThat(html.indexOf("Scan steps")).isGreaterThan(html.indexOf("Scan time"));
     }
 
     @Test
@@ -64,7 +81,8 @@ class ReportHelperTest {
 
         assertThat(Files.readString(report))
                 .contains("No duplicate media files found")
-                .contains("data-bytes=\"0\"");
+                .contains("data-bytes=\"0\"")
+                .doesNotContain("${scanStepsSummary}");
     }
 
     @Test

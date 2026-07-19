@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributeView;
 import java.nio.file.attribute.FileTime;
+import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -258,7 +259,7 @@ class FileHelperTest extends TestBase {
         List<ScanProgress.Snapshot> updates = new CopyOnWriteArrayList<>();
         ScanProgress progress = new ScanProgress(updates::add);
 
-        new FileHelper(List.of(tempDir), progress).scan();
+        ScanResult result = new FileHelper(List.of(tempDir), progress).scan();
 
         assertThat(updates)
                 .extracting(ScanProgress.Snapshot::stage)
@@ -294,5 +295,15 @@ class FileHelperTest extends TestBase {
         assertThat(completed.mediaFilesDiscovered()).isEqualTo(2);
         assertThat(completed.directoriesProcessed()).isEqualTo(2);
         assertThat(completed.completed()).isEqualTo(completed.total());
+        assertThat(result.stageDurations()).containsOnlyKeys(
+                ScanProgress.Stage.DISCOVERING,
+                ScanProgress.Stage.GROUPING_BY_SIZE,
+                ScanProgress.Stage.SAMPLING,
+                ScanProgress.Stage.HASHING,
+                ScanProgress.Stage.FINALIZING
+        );
+        assertThat(result.stageDurations().values()).allSatisfy(duration ->
+                assertThat(duration).isGreaterThanOrEqualTo(Duration.ZERO)
+        );
     }
 }
