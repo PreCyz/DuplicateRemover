@@ -2,6 +2,7 @@ package pg.duplicatefileremover.helpers;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import pg.duplicatefileremover.DiskType;
 
 import java.net.URI;
 import java.net.http.*;
@@ -15,6 +16,19 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class ReportServerTest {
+
+    @Test
+    void selectsDiskSpecificDeletionConcurrency(@TempDir Path tempDir) throws Exception {
+        ScanResult result = new ScanResult(0, List.of(), Duration.ZERO);
+        Path hddReport = Files.writeString(tempDir.resolve("hdd-report.html"), "<html>report</html>");
+        Path nvmeReport = Files.writeString(tempDir.resolve("nvme-report.html"), "<html>report</html>");
+
+        try (ReportServer hdd = new ReportServer(result, hddReport, DiskType.HDD);
+             ReportServer nvme = new ReportServer(result, nvmeReport, DiskType.NVME)) {
+            assertThat(hdd.deletionWorkerCount()).isEqualTo(1);
+            assertThat(nvme.deletionWorkerCount()).isGreaterThan(hdd.deletionWorkerCount());
+        }
+    }
 
     @Test
     void servesPackagedBootstrapStylesheet(@TempDir Path tempDir) throws Exception {
@@ -148,7 +162,7 @@ class ReportServerTest {
         AtomicInteger activeDeletions = new AtomicInteger();
         AtomicInteger maximumActiveDeletions = new AtomicInteger();
 
-        try (ReportServer server = new ReportServer(result, report, Duration.ofSeconds(1), ignored -> {
+        try (ReportServer server = new ReportServer(result, report, DiskType.NVME, Duration.ofSeconds(1), ignored -> {
             int active = activeDeletions.incrementAndGet();
             maximumActiveDeletions.accumulateAndGet(active, Math::max);
             bothDeletionsStarted.countDown();
@@ -202,7 +216,7 @@ class ReportServerTest {
         CountDownLatch deletionStarted = new CountDownLatch(1);
         CountDownLatch allowDeletion = new CountDownLatch(1);
 
-        try (ReportServer server = new ReportServer(result, report, Duration.ofSeconds(1), ignored -> {
+        try (ReportServer server = new ReportServer(result, report, DiskType.NVME, Duration.ofSeconds(1), ignored -> {
             deletionStarted.countDown();
             try {
                 allowDeletion.await();
@@ -284,7 +298,7 @@ class ReportServerTest {
         CountDownLatch deletionStarted = new CountDownLatch(1);
         CountDownLatch allowDeletion = new CountDownLatch(1);
 
-        try (ReportServer server = new ReportServer(result, report, Duration.ofMillis(100), ignored -> {
+        try (ReportServer server = new ReportServer(result, report, DiskType.NVME, Duration.ofMillis(100), ignored -> {
             deletionStarted.countDown();
             try {
                 allowDeletion.await();

@@ -26,9 +26,16 @@ class FileHelperTest extends TestBase {
         assertThat(hdd.traversalWorkers()).isEqualTo(2);
         assertThat(hdd.samplingWorkers()).isEqualTo(1);
         assertThat(hdd.hashingWorkers()).isEqualTo(1);
+        assertThat(hdd.progressiveSampling()).isTrue();
+        assertThat(hdd.pathOrderedIo()).isTrue();
+        assertThat(hdd.deletionWorkers()).isEqualTo(1);
         assertThat(nvme.samplingWorkers()).isGreaterThan(hdd.samplingWorkers());
         assertThat(nvme.hashingWorkers()).isGreaterThan(hdd.hashingWorkers());
         assertThat(nvme.hashBufferSize()).isGreaterThan(hdd.hashBufferSize());
+        assertThat(nvme.progressiveSampling()).isFalse();
+        assertThat(nvme.pathOrderedIo()).isFalse();
+        assertThat(nvme.deletionWorkers()).isGreaterThan(hdd.deletionWorkers());
+        assertThat(nvme.deletionHashBufferSize()).isGreaterThan(hdd.deletionHashBufferSize());
     }
 
     @Test
@@ -136,6 +143,55 @@ class FileHelperTest extends TestBase {
         });
         assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.HASHING)
                 .allSatisfy(update -> assertThat(update.total()).isEqualTo(3));
+    }
+
+    @Test
+    void progressiveHddSamplingPreservesDuplicateDetection(@TempDir Path tempDir) throws Exception {
+        int fileSize = 512 * 1024;
+        byte[] matchingContent = new byte[fileSize];
+        byte[] differentContent = matchingContent.clone();
+        differentContent[fileSize / 2] = 1;
+        Path original = Files.write(tempDir.resolve("original.jpg"), matchingContent);
+        Path duplicate = Files.write(tempDir.resolve("duplicate.jpg"), matchingContent);
+        Path different = Files.write(tempDir.resolve("different.jpg"), differentContent);
+
+        ScanResult result = new FileHelper(
+                List.of(tempDir),
+                new ScanProgress(),
+                DiskType.HDD,
+                null
+        ).scan();
+
+        assertThat(result.duplicateCount()).isEqualTo(1);
+        assertThat(result.duplicateGroups()).singleElement().satisfies(group -> {
+            assertThat(List.of(group.original(), group.duplicates().getFirst()))
+                    .containsExactlyInAnyOrder(original.toAbsolutePath(), duplicate.toAbsolutePath());
+            assertThat(group.original()).isNotEqualTo(different.toAbsolutePath());
+            assertThat(group.duplicates()).doesNotContain(different.toAbsolutePath());
+        });
+    }
+
+    @Test
+    void fullyCachedSizeGroupSkipsSamplingAndHashing(@TempDir Path tempDir) throws Exception {
+        byte[] content = new byte[512 * 1024];
+        Files.write(tempDir.resolve("original.jpg"), content);
+        Files.write(tempDir.resolve("duplicate.jpg"), content);
+        Path cache = tempDir.resolve("cache").resolve("hashes.properties");
+
+        new FileHelper(List.of(tempDir), new ScanProgress(), DiskType.HDD, cache).scan();
+        List<ScanProgress.Snapshot> updates = new CopyOnWriteArrayList<>();
+        ScanResult cachedScan = new FileHelper(
+                List.of(tempDir),
+                new ScanProgress(updates::add),
+                DiskType.HDD,
+                cache
+        ).scan();
+
+        assertThat(cachedScan.duplicateCount()).isEqualTo(1);
+        assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.SAMPLING)
+                .allSatisfy(update -> assertThat(update.total()).isZero());
+        assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.HASHING)
+                .allSatisfy(update -> assertThat(update.total()).isZero());
     }
 
     @Test

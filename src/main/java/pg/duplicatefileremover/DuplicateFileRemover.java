@@ -44,7 +44,7 @@ public class DuplicateFileRemover {
                 result = new FileHelper(arguments.roots(), progress, arguments.diskType(), HASH_CACHE_PATH).scan();
             }
 
-            try (ReportServer server = new ReportServer(result, REPORT_PATH)) {
+            try (ReportServer server = new ReportServer(result, REPORT_PATH, arguments.diskType())) {
                 Path report = new ReportHelper(result, REPORT_PATH, server).createReport();
                 server.start();
                 System.out.printf("Scanned %d media files and found %d duplicates (%s).%n",
@@ -73,12 +73,13 @@ public class DuplicateFileRemover {
 
     static String scanConcurrencyInfo(DiskType diskType) {
         FileHelper.ScanProfile profile = FileHelper.scanProfile(diskType);
-        return "Disk type: %s. Using up to %d traversal, %d sampling, and %d hashing virtual threads."
+        return "Disk type: %s. Using up to %d traversal, %d sampling, %d hashing, and %d deletion virtual threads."
                 .formatted(
                         diskType.displayName(),
                         profile.traversalWorkers(),
                         profile.samplingWorkers(),
-                        profile.hashingWorkers()
+                        profile.hashingWorkers(),
+                        profile.deletionWorkers()
                 );
     }
 

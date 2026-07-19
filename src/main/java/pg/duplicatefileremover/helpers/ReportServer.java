@@ -2,6 +2,7 @@ package pg.duplicatefileremover.helpers;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import pg.duplicatefileremover.DiskType;
 
 import java.io.*;
 import java.net.*;
@@ -20,19 +21,13 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
     private static final String TOKEN_PARAMETER = "token=";
     private static final String BOOTSTRAP_CSS_RESOURCE = "/bootstrap.min.css";
     private static final Duration DEFAULT_SESSION_TIMEOUT = Duration.ofSeconds(15);
-    private static final int DELETION_WORKER_COUNT = (int) Math.clamp(
-            (long) Runtime.getRuntime().availableProcessors(),
-            2,
-            8
-    );
     private static final Pattern SESSION_ID = Pattern.compile("[A-Za-z0-9-]{1,64}");
 
     private final HttpServer server;
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
-    private final ExecutorService deletionExecutor = Executors.newFixedThreadPool(
-            DELETION_WORKER_COUNT,
-            Thread.ofVirtual().name("duplicate-deletion-", 0).factory()
-    );
+    private final ExecutorService deletionExecutor;
+    private final int deletionWorkerCount;
+    private final int deletionHashBufferSize;
     private final ScheduledExecutorService sessionMonitor;
     private final Path reportPath;
     private final Duration sessionTimeout;
@@ -54,11 +49,15 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
     private int activeDeletionRequests;
 
     public ReportServer(ScanResult scanResult, Path reportPath) throws IOException {
-        this(scanResult, reportPath, DEFAULT_SESSION_TIMEOUT);
+        this(scanResult, reportPath, DiskType.HDD);
+    }
+
+    public ReportServer(ScanResult scanResult, Path reportPath, DiskType diskType) throws IOException {
+        this(scanResult, reportPath, diskType, DEFAULT_SESSION_TIMEOUT, ignored -> { });
     }
 
     ReportServer(ScanResult scanResult, Path reportPath, Duration sessionTimeout) throws IOException {
-        this(scanResult, reportPath, sessionTimeout, ignored -> { });
+        this(scanResult, reportPath, DiskType.HDD, sessionTimeout, ignored -> { });
     }
 
     ReportServer(
@@ -67,9 +66,26 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
             Duration sessionTimeout,
             Consumer<Path> beforeDelete
     ) throws IOException {
+        this(scanResult, reportPath, DiskType.HDD, sessionTimeout, beforeDelete);
+    }
+
+    ReportServer(
+            ScanResult scanResult,
+            Path reportPath,
+            DiskType diskType,
+            Duration sessionTimeout,
+            Consumer<Path> beforeDelete
+    ) throws IOException {
         if (sessionTimeout.isZero() || sessionTimeout.isNegative()) {
             throw new IllegalArgumentException("Session timeout must be positive");
         }
+        FileHelper.ScanProfile profile = FileHelper.scanProfile(Objects.requireNonNull(diskType, "diskType"));
+        this.deletionWorkerCount = profile.deletionWorkers();
+        this.deletionHashBufferSize = profile.deletionHashBufferSize();
+        this.deletionExecutor = Executors.newFixedThreadPool(
+                deletionWorkerCount,
+                Thread.ofVirtual().name("duplicate-deletion-", 0).factory()
+        );
         this.reportPath = reportPath.toAbsolutePath().normalize();
         this.sessionTimeout = sessionTimeout;
         this.beforeDelete = Objects.requireNonNull(beforeDelete);
@@ -139,7 +155,7 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
 
     @Override
     public int deletionWorkerCount() {
-        return DELETION_WORKER_COUNT;
+        return deletionWorkerCount;
     }
 
     public CompletionStage<Void> browserSessionsEnded() {
@@ -340,7 +356,8 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
             }
             if (!Files.isRegularFile(duplicate.path(), LinkOption.NOFOLLOW_LINKS)
                     || Files.size(duplicate.path()) != duplicate.size()
-                    || !FileHelper.getSHAHashForFile(duplicate.path()).equals(duplicate.hash())) {
+                    || !FileHelper.getSHAHashForFile(duplicate.path(), deletionHashBufferSize)
+                            .equals(duplicate.hash())) {
                 return DeleteStatus.CHANGED;
             }
             beforeDelete.accept(duplicate.path());

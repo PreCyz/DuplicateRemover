@@ -39,7 +39,7 @@ On Windows, the bundled launcher accepts the same directory arguments:
 
 The application:
 
-1. Recursively scans supported media files using disk-specific traversal, sampling, hashing, and buffer settings.
+1. Recursively scans supported media files using disk-specific traversal, sampling, hashing, deletion, and buffer settings. HDD scans keep content I/O path-ordered and progressively sample the beginning, middle, and end only for still-colliding files; NVMe scans favor higher concurrency.
 2. Writes `reports/duplicates-report.html`.
 3. Starts a loopback-only report server and attempts to open the report in your browser.
 4. Keeps the local report server running until you close all report tabs or press Enter in the terminal.
@@ -48,7 +48,7 @@ Keep the terminal window open while using **Remove** or **Remove All Duplicates*
 
 If the browser does not open automatically, copy the `http://127.0.0.1:...` URL printed in the terminal. Opening the saved HTML file directly still requires the application and its local report server to be running for previews and removal actions.
 
-Full SHA-256 results are cached in `reports/hash-cache.properties` and reused only while a file's normalized path, size, creation time, and modification time still match. The cache location can be overridden with the `duplicate.hash.cache.path` system property. Files are always rehashed immediately before deletion.
+Full SHA-256 results are cached in `reports/hash-cache.properties` and reused only while a file's normalized path, size, creation time, and modification time still match. Same-size groups whose files are all cached bypass content sampling and hashing. The cache location can be overridden with the `duplicate.hash.cache.path` system property. Files are always rehashed immediately before deletion using disk-specific worker and buffer settings.
 
 ## Supported media extensions
 

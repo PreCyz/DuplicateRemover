@@ -35,11 +35,12 @@ public class DuplicateFileRemoverTest {
         FileHelper.ScanProfile profile = FileHelper.scanProfile(DiskType.HDD);
 
         assertThat(DuplicateFileRemover.scanConcurrencyInfo(DiskType.HDD))
-                .isEqualTo("Disk type: HDD. Using up to %d traversal, %d sampling, and %d hashing virtual threads."
+                .isEqualTo("Disk type: HDD. Using up to %d traversal, %d sampling, %d hashing, and %d deletion virtual threads."
                         .formatted(
                                 profile.traversalWorkers(),
                                 profile.samplingWorkers(),
-                                profile.hashingWorkers()
+                                profile.hashingWorkers(),
+                                profile.deletionWorkers()
                         ));
     }
 

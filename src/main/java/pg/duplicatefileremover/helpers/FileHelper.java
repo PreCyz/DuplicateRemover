@@ -59,12 +59,16 @@ public class FileHelper {
         try {
             hashCache.load(progress);
             Map<Long, List<FileMetadata>> filesBySize;
-            ConcurrentMap<HashKey, ConcurrentLinkedQueue<FileMetadata>> filesByHash;
+            ConcurrentMap<HashKey, ConcurrentLinkedQueue<FileMetadata>> filesByHash = new ConcurrentHashMap<>();
             try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
                 List<FileMetadata> mediaFiles = collectMediaFiles(executor);
                 filesBySize = groupFilesBySize(mediaFiles);
-                ConcurrentLinkedQueue<FileMetadata> hashCandidates = prefilterHashCandidates(filesBySize, executor);
-                filesByHash = groupFilesByHash(hashCandidates, executor);
+                ConcurrentLinkedQueue<FileMetadata> hashCandidates = prefilterHashCandidates(
+                        filesBySize,
+                        executor,
+                        filesByHash
+                );
+                groupFilesByHash(hashCandidates, executor, filesByHash);
             }
             hashCache.save(progress);
 
@@ -107,11 +111,15 @@ public class FileHelper {
     public static ScanProfile scanProfile(DiskType diskType) {
         int processors = Runtime.getRuntime().availableProcessors();
         return switch (diskType) {
-            case HDD -> new ScanProfile(2, 1, 1, 256 * 1024);
+            case HDD -> new ScanProfile(2, 1, 1, 256 * 1024, true, true, 1, 256 * 1024);
             case NVME -> new ScanProfile(
                     (int) Math.clamp((long) processors, 4, 16),
                     (int) Math.clamp(processors * 2L, 4, 32),
                     (int) Math.clamp((long) processors, 2, 16),
+                    1024 * 1024,
+                    false,
+                    false,
+                    (int) Math.clamp((long) processors, 2, 8),
                     1024 * 1024
             );
         };
@@ -137,8 +145,15 @@ public class FileHelper {
     }
 
     public static String getSHAHashForFile(Path file) throws NoSuchAlgorithmException, IOException {
+        return getSHAHashForFile(file, DEFAULT_HASH_BUFFER_SIZE);
+    }
+
+    static String getSHAHashForFile(Path file, int bufferSize) throws NoSuchAlgorithmException, IOException {
+        if (bufferSize <= 0) {
+            throw new IllegalArgumentException("Hash buffer size must be positive");
+        }
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        byte[] buffer = new byte[DEFAULT_HASH_BUFFER_SIZE];
+        byte[] buffer = new byte[bufferSize];
         return getSHAHashForFile(file, digest, buffer);
     }
 
@@ -205,15 +220,22 @@ public class FileHelper {
 
     private ConcurrentLinkedQueue<FileMetadata> prefilterHashCandidates(
             Map<Long, List<FileMetadata>> filesBySize,
-            ExecutorService executor
+            ExecutorService executor,
+            ConcurrentMap<HashKey, ConcurrentLinkedQueue<FileMetadata>> filesByHash
     ) throws IOException, NoSuchAlgorithmException {
-        ConcurrentLinkedQueue<FileMetadata> candidates = new ConcurrentLinkedQueue<>();
-        filesBySize.forEach((size, paths) -> {
-            if (paths.size() > 1) {
-                candidates.addAll(paths);
+        List<FileMetadata> candidateList = new ArrayList<>();
+        for (List<FileMetadata> paths : filesBySize.values()) {
+            if (paths.size() > 1 && !addFullyCachedGroup(paths, filesByHash)) {
+                candidateList.addAll(paths);
             }
-        });
+        }
+        candidateList = orderForIo(candidateList);
+        ConcurrentLinkedQueue<FileMetadata> candidates = new ConcurrentLinkedQueue<>(candidateList);
         progress.begin(ScanProgress.Stage.SAMPLING, candidates.size());
+
+        if (scanProfile.progressiveSampling()) {
+            return progressivelySampleHddCandidates(candidateList);
+        }
 
         ConcurrentLinkedQueue<FileMetadata> fullHashCandidates = new ConcurrentLinkedQueue<>();
         ConcurrentMap<QuickHashKey, ConcurrentLinkedQueue<FileMetadata>> filesByFingerprint = new ConcurrentHashMap<>();
@@ -251,16 +273,92 @@ public class FileHelper {
         filesByFingerprint.values().stream()
                 .filter(paths -> paths.size() > 1)
                 .forEach(fullHashCandidates::addAll);
-        return fullHashCandidates;
+        return new ConcurrentLinkedQueue<>(orderForIo(fullHashCandidates));
     }
 
-    private ConcurrentMap<HashKey, ConcurrentLinkedQueue<FileMetadata>> groupFilesByHash(
+    private boolean addFullyCachedGroup(
+            List<FileMetadata> candidates,
+            ConcurrentMap<HashKey, ConcurrentLinkedQueue<FileMetadata>> filesByHash
+    ) throws IOException {
+        Map<FileMetadata, String> cachedHashes = new LinkedHashMap<>();
+        for (FileMetadata candidate : candidates) {
+            String hash = hashCache.find(candidate);
+            if (hash == null) {
+                return false;
+            }
+            cachedHashes.put(candidate, hash);
+        }
+        for (FileMetadata candidate : candidates) {
+            ensureMetadataUnchanged(candidate);
+        }
+        cachedHashes.forEach((candidate, hash) -> filesByHash
+                .computeIfAbsent(new HashKey(candidate.size(), hash), ignored -> new ConcurrentLinkedQueue<>())
+                .add(candidate));
+        return true;
+    }
+
+    private ConcurrentLinkedQueue<FileMetadata> progressivelySampleHddCandidates(
+            List<FileMetadata> candidates
+    ) throws IOException, NoSuchAlgorithmException {
+        List<FileMetadata> fullHashCandidates = new ArrayList<>();
+        Map<Long, List<FileMetadata>> largeFilesBySize = new LinkedHashMap<>();
+        for (FileMetadata candidate : candidates) {
+            if (candidate.size() <= FINGERPRINT_MIN_FILE_SIZE) {
+                fullHashCandidates.add(candidate);
+                progress.itemCompleted();
+            } else {
+                largeFilesBySize.computeIfAbsent(candidate.size(), ignored -> new ArrayList<>()).add(candidate);
+            }
+        }
+
+        List<ProgressiveCandidate> activeCandidates = new ArrayList<>();
+        for (Map.Entry<Long, List<FileMetadata>> sizeGroup : largeFilesBySize.entrySet()) {
+            for (FileMetadata file : sizeGroup.getValue()) {
+                activeCandidates.add(new ProgressiveCandidate(file, Long.toString(sizeGroup.getKey())));
+            }
+        }
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        ByteBuffer sample = ByteBuffer.allocate(FINGERPRINT_SAMPLE_SIZE);
+        for (int round = 0; round < 3 && !activeCandidates.isEmpty(); round++) {
+            activeCandidates.sort(Comparator.comparing(candidate -> candidate.file().path().toString()));
+            Map<String, List<ProgressiveCandidate>> candidatesByFingerprint = new LinkedHashMap<>();
+            for (ProgressiveCandidate candidate : activeCandidates) {
+                try {
+                    String fingerprint = getSampledFingerprint(candidate.file(), digest, sample, round);
+                    String groupingKey = candidate.groupingKey() + ':' + fingerprint;
+                    candidatesByFingerprint.computeIfAbsent(groupingKey, ignored -> new ArrayList<>())
+                            .add(new ProgressiveCandidate(candidate.file(), groupingKey));
+                } finally {
+                    if (round == 0) {
+                        progress.itemCompleted();
+                    }
+                }
+            }
+            activeCandidates = candidatesByFingerprint.values().stream()
+                    .filter(group -> group.size() > 1)
+                    .flatMap(Collection::stream)
+                    .collect(Collectors.toCollection(ArrayList::new));
+        }
+        activeCandidates.stream().map(ProgressiveCandidate::file).forEach(fullHashCandidates::add);
+        return new ConcurrentLinkedQueue<>(orderForIo(fullHashCandidates));
+    }
+
+    private List<FileMetadata> orderForIo(Collection<FileMetadata> candidates) {
+        if (!scanProfile.pathOrderedIo()) {
+            return new ArrayList<>(candidates);
+        }
+        return candidates.stream()
+                .sorted(Comparator.comparing(metadata -> metadata.path().toString()))
+                .toList();
+    }
+
+    private void groupFilesByHash(
             ConcurrentLinkedQueue<FileMetadata> candidates,
-            ExecutorService executor
+            ExecutorService executor,
+            ConcurrentMap<HashKey, ConcurrentLinkedQueue<FileMetadata>> filesByHash
     ) throws IOException, NoSuchAlgorithmException {
         progress.begin(ScanProgress.Stage.HASHING, candidates.size());
 
-        ConcurrentMap<HashKey, ConcurrentLinkedQueue<FileMetadata>> filesByHash = new ConcurrentHashMap<>();
         ConcurrentLinkedQueue<Exception> failures = new ConcurrentLinkedQueue<>();
         List<Future<?>> workers = startWorkers(executor, scanProfile.hashingWorkers(), () -> {
             try {
@@ -289,7 +387,6 @@ public class FileHelper {
         });
         awaitWorkers(workers);
         throwHashingFailure(failures.peek());
-        return filesByHash;
     }
 
     private static String getSampledFingerprint(
@@ -306,6 +403,28 @@ public class FileHelper {
             updateDigestFromPosition(channel, digest, sample, 0);
             updateDigestFromPosition(channel, digest, sample, middle);
             updateDigestFromPosition(channel, digest, sample, file.size() - FINGERPRINT_SAMPLE_SIZE);
+        }
+        return HexFormat.of().formatHex(digest.digest());
+    }
+
+    private static String getSampledFingerprint(
+            FileMetadata file,
+            MessageDigest digest,
+            ByteBuffer sample,
+            int round
+    ) throws IOException {
+        long filePosition = switch (round) {
+            case 0 -> 0;
+            case 1 -> (file.size() - FINGERPRINT_SAMPLE_SIZE) / 2;
+            case 2 -> file.size() - FINGERPRINT_SAMPLE_SIZE;
+            default -> throw new IllegalArgumentException("Unsupported sampling round: " + round);
+        };
+        digest.reset();
+        try (FileChannel channel = FileChannel.open(file.path(), StandardOpenOption.READ)) {
+            if (channel.size() != file.size()) {
+                throw new IOException("File size changed while scanning: " + file.path());
+            }
+            updateDigestFromPosition(channel, digest, sample, filePosition);
         }
         return HexFormat.of().formatHex(digest.digest());
     }
@@ -541,7 +660,11 @@ public class FileHelper {
             int traversalWorkers,
             int samplingWorkers,
             int hashingWorkers,
-            int hashBufferSize
+            int hashBufferSize,
+            boolean progressiveSampling,
+            boolean pathOrderedIo,
+            int deletionWorkers,
+            int deletionHashBufferSize
     ) {
     }
 
@@ -557,6 +680,9 @@ public class FileHelper {
     }
 
     private record QuickHashKey(long size, String hash) {
+    }
+
+    private record ProgressiveCandidate(FileMetadata file, String groupingKey) {
     }
 
     private record CachedHash(long size, long creationMillis, long modifiedMillis, String hash) {
