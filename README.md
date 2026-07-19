@@ -1,6 +1,6 @@
 # Duplicate File Remover
 
-Duplicate File Remover scans one or more directories recursively for supported image and video files. Files are first grouped by size and then compared using SHA-256, so equal-sized files with different content are not reported as duplicates. Within each matching group, the oldest file by creation time and then modification time is treated as the origin; the path is used as a deterministic tie-breaker.
+Duplicate File Remover scans one or more directories recursively for supported image and video files. Files are first grouped by size; large candidates are sampled at the beginning, middle, and end before sample-matching files are compared using full SHA-256. Equal-sized files with different content are therefore not reported as duplicates. Within each matching group, the oldest file by creation time and then modification time is treated as the origin; the path is used as a deterministic tie-breaker.
 
 The generated Bootstrap report shows the original file, every duplicate path, media previews, scan statistics, and the disk space occupied by duplicates. The report can remove one duplicate or all reported duplicates while preserving every origin file.
 

@@ -3,6 +3,8 @@ package pg.duplicatefileremover.helpers;
 import pg.duplicatefileremover.FileExtension;
 
 import java.io.*;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
@@ -16,6 +18,8 @@ import java.util.stream.Collectors;
 
 public class FileHelper {
     private static final int HASH_BUFFER_SIZE = 64 * 1024;
+    private static final int FINGERPRINT_SAMPLE_SIZE = 64 * 1024;
+    private static final long FINGERPRINT_MIN_FILE_SIZE = FINGERPRINT_SAMPLE_SIZE * 3L;
     private static final int MAX_CONCURRENT_FILE_OPERATIONS = Math.clamp(Runtime.getRuntime().availableProcessors() * 2L, 4, 32);
     private static final Set<String> ALLOWED_EXTENSIONS = EnumSet.allOf(FileExtension.class)
             .stream()
@@ -50,7 +54,8 @@ public class FileHelper {
             try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
                 List<Path> mediaFiles = collectMediaFiles(executor);
                 filesBySize = groupFilesBySize(mediaFiles, executor);
-                filesByHash = groupFilesByHash(filesBySize, executor);
+                ConcurrentLinkedQueue<SizedPath> hashCandidates = prefilterHashCandidates(filesBySize, executor);
+                filesByHash = groupFilesByHash(hashCandidates, executor);
             }
 
             progress.begin(ScanProgress.Stage.FINALIZING, filesByHash.size());
@@ -182,7 +187,7 @@ public class FileHelper {
         return filesBySize;
     }
 
-    private ConcurrentMap<HashKey, ConcurrentLinkedQueue<Path>> groupFilesByHash(
+    private ConcurrentLinkedQueue<SizedPath> prefilterHashCandidates(
             ConcurrentMap<Long, ConcurrentLinkedQueue<Path>> filesBySize,
             ExecutorService executor
     ) throws IOException, NoSuchAlgorithmException {
@@ -192,6 +197,45 @@ public class FileHelper {
                 paths.forEach(path -> candidates.add(new SizedPath(size, path)));
             }
         });
+        progress.begin(ScanProgress.Stage.SAMPLING, candidates.size());
+
+        ConcurrentLinkedQueue<SizedPath> fullHashCandidates = new ConcurrentLinkedQueue<>();
+        ConcurrentMap<QuickHashKey, ConcurrentLinkedQueue<SizedPath>> filesByFingerprint = new ConcurrentHashMap<>();
+        ConcurrentLinkedQueue<Exception> failures = new ConcurrentLinkedQueue<>();
+        List<Future<?>> workers = startWorkers(executor, () -> {
+            SizedPath candidate;
+            while (failures.isEmpty() && (candidate = candidates.poll()) != null) {
+                try {
+                    if (candidate.size() <= FINGERPRINT_MIN_FILE_SIZE) {
+                        fullHashCandidates.add(candidate);
+                    } else {
+                        QuickHashKey key = new QuickHashKey(
+                                candidate.size(),
+                                getSampledFingerprint(candidate.path(), candidate.size())
+                        );
+                        filesByFingerprint.computeIfAbsent(key, ignored -> new ConcurrentLinkedQueue<>())
+                                .add(candidate);
+                    }
+                } catch (IOException | NoSuchAlgorithmException exception) {
+                    failures.add(exception);
+                } finally {
+                    progress.itemCompleted();
+                }
+            }
+        });
+        awaitWorkers(workers);
+        throwHashingFailure(failures.peek());
+
+        filesByFingerprint.values().stream()
+                .filter(paths -> paths.size() > 1)
+                .forEach(fullHashCandidates::addAll);
+        return fullHashCandidates;
+    }
+
+    private ConcurrentMap<HashKey, ConcurrentLinkedQueue<Path>> groupFilesByHash(
+            ConcurrentLinkedQueue<SizedPath> candidates,
+            ExecutorService executor
+    ) throws IOException, NoSuchAlgorithmException {
         progress.begin(ScanProgress.Stage.HASHING, candidates.size());
 
         ConcurrentMap<HashKey, ConcurrentLinkedQueue<Path>> filesByHash = new ConcurrentHashMap<>();
@@ -210,15 +254,50 @@ public class FileHelper {
             }
         });
         awaitWorkers(workers);
+        throwHashingFailure(failures.peek());
+        return filesByHash;
+    }
 
-        Exception failure = failures.peek();
+    private static String getSampledFingerprint(Path file, long expectedSize)
+            throws IOException, NoSuchAlgorithmException {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
+            if (channel.size() != expectedSize) {
+                throw new IOException("File size changed while scanning: " + file);
+            }
+            ByteBuffer sample = ByteBuffer.allocate(FINGERPRINT_SAMPLE_SIZE);
+            long middle = (expectedSize - FINGERPRINT_SAMPLE_SIZE) / 2;
+            updateDigestFromPosition(channel, digest, sample, 0);
+            updateDigestFromPosition(channel, digest, sample, middle);
+            updateDigestFromPosition(channel, digest, sample, expectedSize - FINGERPRINT_SAMPLE_SIZE);
+        }
+        return HexFormat.of().formatHex(digest.digest());
+    }
+
+    private static void updateDigestFromPosition(
+            FileChannel channel,
+            MessageDigest digest,
+            ByteBuffer sample,
+            long filePosition
+    ) throws IOException {
+        sample.clear();
+        while (sample.hasRemaining()) {
+            int bytesRead = channel.read(sample, filePosition + sample.position());
+            if (bytesRead < 0) {
+                throw new EOFException("File changed while calculating its sampled fingerprint");
+            }
+        }
+        sample.flip();
+        digest.update(sample);
+    }
+
+    private static void throwHashingFailure(Exception failure) throws IOException, NoSuchAlgorithmException {
         if (failure instanceof IOException ioException) {
             throw ioException;
         }
         if (failure instanceof NoSuchAlgorithmException algorithmException) {
             throw algorithmException;
         }
-        return filesByHash;
     }
 
     private static void enqueueDirectory(
@@ -327,5 +406,8 @@ public class FileHelper {
     }
 
     private record HashKey(long size, String hash) {
+    }
+
+    private record QuickHashKey(long size, String hash) {
     }
 }

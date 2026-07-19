@@ -64,6 +64,7 @@ public final class TerminalProgressBar implements AutoCloseable {
                     snapshot.mediaFilesDiscovered()
             );
             case READING_METADATA -> determinate("Reading metadata", snapshot);
+            case SAMPLING -> determinate("Sampling content", snapshot);
             case HASHING -> determinate("Hashing", snapshot);
             case FINALIZING -> determinate("Finalizing", snapshot);
             case COMPLETE -> String.format(

@@ -82,6 +82,49 @@ class FileHelperTest extends TestBase {
     }
 
     @Test
+    void sampledFingerprintSkipsFullHashForClearlyDifferentLargeFiles(@TempDir Path tempDir) throws Exception {
+        int fileSize = 512 * 1024;
+        byte[] firstContent = new byte[fileSize];
+        byte[] secondContent = new byte[fileSize];
+        secondContent[0] = 1;
+        Files.write(tempDir.resolve("first.jpg"), firstContent);
+        Files.write(tempDir.resolve("second.jpg"), secondContent);
+        List<ScanProgress.Snapshot> updates = new CopyOnWriteArrayList<>();
+
+        ScanResult result = new FileHelper(List.of(tempDir), new ScanProgress(updates::add)).scan();
+
+        assertThat(result.duplicateGroups()).isEmpty();
+        assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.SAMPLING)
+                .allSatisfy(update -> assertThat(update.total()).isEqualTo(2));
+        assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.HASHING)
+                .allSatisfy(update -> assertThat(update.total()).isZero());
+    }
+
+    @Test
+    void matchingSamplesStillUseFullHashToSeparateLargeFiles(@TempDir Path tempDir) throws Exception {
+        int fileSize = 512 * 1024;
+        byte[] matchingContent = new byte[fileSize];
+        byte[] differentContent = matchingContent.clone();
+        differentContent[128 * 1024] = 1;
+        Path original = Files.write(tempDir.resolve("original.jpg"), matchingContent);
+        Path duplicate = Files.write(tempDir.resolve("duplicate.jpg"), matchingContent);
+        Path different = Files.write(tempDir.resolve("different.jpg"), differentContent);
+        List<ScanProgress.Snapshot> updates = new CopyOnWriteArrayList<>();
+
+        ScanResult result = new FileHelper(List.of(tempDir), new ScanProgress(updates::add)).scan();
+
+        assertThat(result.duplicateCount()).isEqualTo(1);
+        assertThat(result.duplicateGroups()).singleElement().satisfies(group -> {
+            assertThat(List.of(group.original(), group.duplicates().getFirst()))
+                    .containsExactlyInAnyOrder(original.toAbsolutePath(), duplicate.toAbsolutePath());
+            assertThat(group.original()).isNotEqualTo(different.toAbsolutePath());
+            assertThat(group.duplicates()).doesNotContain(different.toAbsolutePath());
+        });
+        assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.HASHING)
+                .allSatisfy(update -> assertThat(update.total()).isEqualTo(3));
+    }
+
+    @Test
     void scanRejectsNonDirectory(@TempDir Path tempDir) throws IOException {
         Path file = Files.writeString(tempDir.resolve("image.jpg"), "content");
         ScanProgress progress = new ScanProgress();
@@ -123,11 +166,14 @@ class FileHelperTest extends TestBase {
                 .containsSubsequence(
                         ScanProgress.Stage.DISCOVERING,
                         ScanProgress.Stage.READING_METADATA,
+                        ScanProgress.Stage.SAMPLING,
                         ScanProgress.Stage.HASHING,
                         ScanProgress.Stage.FINALIZING,
                         ScanProgress.Stage.COMPLETE
                 );
         assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.READING_METADATA)
+                .allSatisfy(update -> assertThat(update.total()).isEqualTo(2));
+        assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.SAMPLING)
                 .allSatisfy(update -> assertThat(update.total()).isEqualTo(2));
         assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.HASHING)
                 .allSatisfy(update -> assertThat(update.total()).isEqualTo(2));
@@ -135,6 +181,7 @@ class FileHelperTest extends TestBase {
                 .allSatisfy(update -> assertThat(update.total()).isEqualTo(1));
         for (ScanProgress.Stage stage : List.of(
                 ScanProgress.Stage.READING_METADATA,
+                ScanProgress.Stage.SAMPLING,
                 ScanProgress.Stage.HASHING,
                 ScanProgress.Stage.FINALIZING
         )) {

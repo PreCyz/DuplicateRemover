@@ -102,6 +102,7 @@ public final class ScanProgress {
         NOT_STARTED,
         DISCOVERING,
         READING_METADATA,
+        SAMPLING,
         HASHING,
         FINALIZING,
         COMPLETE,

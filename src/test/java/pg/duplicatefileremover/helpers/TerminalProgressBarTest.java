@@ -94,6 +94,8 @@ class TerminalProgressBarTest {
             progress.directoryProcessed();
             progress.begin(ScanProgress.Stage.READING_METADATA, 1);
             progress.itemCompleted();
+            progress.begin(ScanProgress.Stage.SAMPLING, 1);
+            progress.itemCompleted();
             progress.begin(ScanProgress.Stage.HASHING, 1);
             progress.itemCompleted();
             progress.begin(ScanProgress.Stage.FINALIZING, 1);
@@ -108,11 +110,12 @@ class TerminalProgressBarTest {
                 .map(line -> line.substring(line.lastIndexOf('\r') + 1).stripTrailing())
                 .toList();
         assertThat(visibleLines)
-                .hasSize(6)
+                .hasSize(7)
                 .satisfiesExactly(
                         line -> assertThat(line).isEqualTo("Preparing scan..."),
                         line -> assertThat(line).startsWith("Discovering"),
                         line -> assertThat(line).startsWith("Reading metadata").contains("100%"),
+                        line -> assertThat(line).startsWith("Sampling content").contains("100%"),
                         line -> assertThat(line).startsWith("Hashing").contains("100%"),
                         line -> assertThat(line).startsWith("Finalizing").contains("100%"),
                         line -> assertThat(line).startsWith("Scan complete")
