@@ -20,10 +20,19 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
     private static final String TOKEN_PARAMETER = "token=";
     private static final String BOOTSTRAP_CSS_RESOURCE = "/bootstrap.min.css";
     private static final Duration DEFAULT_SESSION_TIMEOUT = Duration.ofSeconds(15);
+    private static final int DELETION_WORKER_COUNT = (int) Math.clamp(
+            (long) Runtime.getRuntime().availableProcessors(),
+            2,
+            8
+    );
     private static final Pattern SESSION_ID = Pattern.compile("[A-Za-z0-9-]{1,64}");
 
     private final HttpServer server;
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+    private final ExecutorService deletionExecutor = Executors.newFixedThreadPool(
+            DELETION_WORKER_COUNT,
+            Thread.ofVirtual().name("duplicate-deletion-", 0).factory()
+    );
     private final ScheduledExecutorService sessionMonitor;
     private final Path reportPath;
     private final Duration sessionTimeout;
@@ -33,6 +42,7 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
     private final Map<Path, String> idsByPath = new LinkedHashMap<>();
     private final Map<String, Path> mediaById = new ConcurrentHashMap<>();
     private final Map<String, RegisteredDuplicate> duplicatesById = new ConcurrentHashMap<>();
+    private final Set<String> deletionsInProgress = ConcurrentHashMap.newKeySet();
     private final Map<String, Long> browserSessions = new ConcurrentHashMap<>();
     private final CompletableFuture<Void> browserSessionsEnded = new CompletableFuture<>();
     private final AtomicBoolean browserConnected = new AtomicBoolean();
@@ -125,6 +135,11 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
         return token;
     }
 
+    @Override
+    public int deletionWorkerCount() {
+        return DELETION_WORKER_COUNT;
+    }
+
     public CompletionStage<Void> browserSessionsEnded() {
         return browserSessionsEnded.minimalCompletionStage();
     }
@@ -138,6 +153,7 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
         server.stop(0);
         sessionMonitor.close();
         executor.close();
+        deletionExecutor.close();
     }
 
     private void registerFiles(ScanResult scanResult) {
@@ -232,8 +248,10 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
                 exchange.close();
             } else if (status == DeleteStatus.NOT_FOUND) {
                 send(exchange, 404, "Duplicate not found", "text/plain; charset=utf-8");
-            } else {
+            } else if (status == DeleteStatus.CHANGED) {
                 send(exchange, 409, "File changed since the scan and was not removed", "text/plain; charset=utf-8");
+            } else {
+                send(exchange, 409, "Duplicate is already being removed", "text/plain; charset=utf-8");
             }
         } finally {
             finishDeletionRequest();
@@ -280,23 +298,35 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
     private void removeAllDuplicates(HttpExchange exchange) throws IOException {
         List<String> deleted = new ArrayList<>();
         List<String> failed = new ArrayList<>();
+        Map<String, Future<DeleteStatus>> deletions = new LinkedHashMap<>();
         for (String id : List.copyOf(duplicatesById.keySet())) {
-            if (deleteDuplicate(id) == DeleteStatus.DELETED) {
+            deletions.put(id, deletionExecutor.submit(() -> deleteDuplicateNow(id)));
+        }
+        for (Map.Entry<String, Future<DeleteStatus>> deletion : deletions.entrySet()) {
+            if (awaitDeletion(deletion.getValue()) == DeleteStatus.DELETED) {
+                String id = deletion.getKey();
                 deleted.add(id);
             } else {
-                failed.add(id);
+                failed.add(deletion.getKey());
             }
         }
         String json = "{\"deletedIds\":" + jsonArray(deleted) + ",\"failedIds\":" + jsonArray(failed) + "}";
         send(exchange, 200, json, "application/json; charset=utf-8");
     }
 
-    private synchronized DeleteStatus deleteDuplicate(String id) {
-        RegisteredDuplicate duplicate = duplicatesById.get(id);
-        if (duplicate == null) {
-            return DeleteStatus.NOT_FOUND;
+    private DeleteStatus deleteDuplicate(String id) throws IOException {
+        return awaitDeletion(deletionExecutor.submit(() -> deleteDuplicateNow(id)));
+    }
+
+    private DeleteStatus deleteDuplicateNow(String id) {
+        if (!deletionsInProgress.add(id)) {
+            return DeleteStatus.IN_PROGRESS;
         }
         try {
+            RegisteredDuplicate duplicate = duplicatesById.get(id);
+            if (duplicate == null) {
+                return DeleteStatus.NOT_FOUND;
+            }
             if (!Files.isRegularFile(duplicate.path(), LinkOption.NOFOLLOW_LINKS)
                     || Files.size(duplicate.path()) != duplicate.size()
                     || !FileHelper.getSHAHashForFile(duplicate.path()).equals(duplicate.hash())) {
@@ -304,11 +334,25 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
             }
             beforeDelete.accept(duplicate.path());
             Files.delete(duplicate.path());
-            duplicatesById.remove(id);
-            mediaById.remove(id);
+            duplicatesById.remove(id, duplicate);
+            mediaById.remove(id, duplicate.path());
             return DeleteStatus.DELETED;
         } catch (IOException | NoSuchAlgorithmException exception) {
             return DeleteStatus.CHANGED;
+        } finally {
+            deletionsInProgress.remove(id);
+        }
+    }
+
+    private DeleteStatus awaitDeletion(Future<DeleteStatus> deletion) throws IOException {
+        try {
+            return deletion.get();
+        } catch (InterruptedException exception) {
+            deletion.cancel(true);
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while removing duplicate", exception);
+        } catch (ExecutionException exception) {
+            throw new IOException("Concurrent duplicate removal failed", exception.getCause());
         }
     }
 
@@ -416,6 +460,7 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
     private enum DeleteStatus {
         DELETED,
         NOT_FOUND,
-        CHANGED
+        CHANGED,
+        IN_PROGRESS
     }
 }

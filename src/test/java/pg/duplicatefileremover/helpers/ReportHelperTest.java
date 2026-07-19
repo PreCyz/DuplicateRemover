@@ -39,6 +39,8 @@ class ReportHelperTest {
                 .contains("text-bg-info")
                 .contains("bootstrap.Toast.getOrCreateInstance")
                 .contains("updateProgress(deleted + failed, total)")
+                .contains("const deletionWorkerCount = 4")
+                .contains("await Promise.all(Array.from({length: activeWorkers}, () => removeNext()))")
                 .contains("Files scanned")
                 .contains(">7</div>")
                 .contains("data-bytes=\"4\"")
@@ -105,6 +107,11 @@ class ReportHelperTest {
         @Override
         public String apiToken() {
             return "test-token";
+        }
+
+        @Override
+        public int deletionWorkerCount() {
+            return 4;
         }
     }
 }

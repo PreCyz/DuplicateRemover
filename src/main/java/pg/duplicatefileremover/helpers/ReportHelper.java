@@ -40,7 +40,8 @@ public class ReportHelper {
                 .replace("${scanDuration}", escapeHtml(formatDuration(scanResult.duration())))
                 .replace("${duplicatesContent}", createTableContent())
                 .replace("${apiBase}", escapeJavaScript(links.apiBase()))
-                .replace("${apiToken}", escapeJavaScript(links.apiToken()));
+                .replace("${apiToken}", escapeJavaScript(links.apiToken()))
+                .replace("${deletionWorkerCount}", Integer.toString(links.deletionWorkerCount()));
 
         Path parent = reportPath.getParent();
         if (parent != null) {
@@ -175,5 +176,7 @@ public class ReportHelper {
         String apiBase();
 
         String apiToken();
+
+        int deletionWorkerCount();
     }
 }
