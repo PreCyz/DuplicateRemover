@@ -36,6 +36,12 @@ public class DuplicateFileRemoverTest {
     }
 
     @Test
+    void reportsHeartbeatSilenceBeforeServerTermination() {
+        assertThat(DuplicateFileRemover.missingHeartbeatInfo(Duration.ofSeconds(15)))
+                .isEqualTo("No browser heartbeat was registered for 15 seconds; stopping the report server.");
+    }
+
+    @Test
     public void givenStartAndEnd_whenGetDuration_thenReturnProperlyFormattedString() {
         LocalTime start = LocalTime.now();
         Duration hours = Duration.ofHours(1);

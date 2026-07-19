@@ -266,6 +266,7 @@ class ReportServerTest {
 
             assertThat(postSession(client, server, "heartbeat", "abandoned-session").statusCode()).isEqualTo(204);
             server.browserSessionsEnded().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            assertThat(server.heartbeatSilenceBeforeShutdown()).isGreaterThanOrEqualTo(Duration.ofMillis(100));
         }
     }
 

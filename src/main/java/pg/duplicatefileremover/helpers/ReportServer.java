@@ -49,6 +49,8 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
     private final AtomicBoolean started = new AtomicBoolean();
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicLong lastSessionActivityNanos = new AtomicLong();
+    private final AtomicLong lastHeartbeatNanos = new AtomicLong();
+    private final AtomicLong heartbeatSilenceAtShutdownNanos = new AtomicLong(-1);
     private int activeDeletionRequests;
 
     public ReportServer(ScanResult scanResult, Path reportPath) throws IOException {
@@ -142,6 +144,14 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
 
     public CompletionStage<Void> browserSessionsEnded() {
         return browserSessionsEnded.minimalCompletionStage();
+    }
+
+    public Duration heartbeatSilenceBeforeShutdown() {
+        long silenceNanos = heartbeatSilenceAtShutdownNanos.get();
+        if (silenceNanos < 0) {
+            throw new IllegalStateException("Browser-session shutdown has not been triggered");
+        }
+        return Duration.ofNanos(silenceNanos);
     }
 
     @Override
@@ -282,6 +292,7 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
             if ("/api/session/heartbeat".equals(path)) {
                 browserSessions.put(sessionId, now);
                 browserConnected.set(true);
+                lastHeartbeatNanos.set(now);
                 lastSessionActivityNanos.set(now);
             } else if ("/api/session/close".equals(path)) {
                 browserSessions.remove(sessionId);
@@ -380,6 +391,10 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
                         && browserSessions.isEmpty()
                         && activeDeletionRequests == 0
                         && now - lastSessionActivityNanos.get() >= sessionTimeout.toNanos()) {
+                    heartbeatSilenceAtShutdownNanos.compareAndSet(
+                            -1,
+                            Math.max(0, now - lastHeartbeatNanos.get())
+                    );
                     browserSessionsEnded.complete(null);
                 }
             }

@@ -73,6 +73,11 @@ public class DuplicateFileRemover {
                 .formatted(FileHelper.concurrentWorkerCount());
     }
 
+    static String missingHeartbeatInfo(Duration heartbeatSilence) {
+        return "No browser heartbeat was registered for %d seconds; stopping the report server."
+                .formatted(heartbeatSilence.toSeconds());
+    }
+
     protected static void validateArgs(String[] args) {
         if (args == null || args.length == 0) {
             throw new UnsupportedOperationException("Path to folder not specified.");
@@ -119,7 +124,7 @@ public class DuplicateFileRemover {
             throw exception;
         }
         if (browserExit.isDone() && !terminalExit.isDone()) {
-            IO.println("All report tabs closed; stopping the report server.");
+            IO.println(missingHeartbeatInfo(server.heartbeatSilenceBeforeShutdown()));
         }
     }
 }
