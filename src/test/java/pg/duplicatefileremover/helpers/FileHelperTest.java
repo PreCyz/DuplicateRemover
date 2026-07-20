@@ -11,6 +11,7 @@ import java.nio.file.attribute.BasicFileAttributeView;
 import java.nio.file.attribute.FileTime;
 import java.time.Duration;
 import java.util.List;
+import java.util.Properties;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -223,6 +224,14 @@ class FileHelperTest extends TestBase {
         ).scan();
 
         assertThat(cachedScan.duplicateCount()).isEqualTo(1);
+        assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.VALIDATING_HASH_CACHE)
+                .allSatisfy(update -> {
+                    assertThat(update.total()).isEqualTo(4);
+                    assertThat(update.completed()).isBetween(0L, 4L);
+                });
+        assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.VALIDATING_HASH_CACHE)
+                .extracting(ScanProgress.Snapshot::completed)
+                .endsWith(4L);
         assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.SAMPLING)
                 .allSatisfy(update -> assertThat(update.total()).isZero());
         assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.HASHING)
@@ -259,6 +268,34 @@ class FileHelperTest extends TestBase {
     }
 
     @Test
+    void removesMissingFilesFromPersistentHashCacheDuringValidation(@TempDir Path tempDir) throws Exception {
+        Path original = Files.writeString(tempDir.resolve("original.jpg"), "same");
+        Path duplicate = Files.writeString(tempDir.resolve("duplicate.jpg"), "same");
+        Path cache = tempDir.resolve("cache").resolve("hashes.properties");
+
+        new FileHelper(List.of(tempDir), new ScanProgress(), DiskType.HDD, cache).scan();
+        Files.delete(duplicate);
+        List<ScanProgress.Snapshot> updates = new CopyOnWriteArrayList<>();
+
+        new FileHelper(
+                List.of(tempDir),
+                new ScanProgress(updates::add),
+                DiskType.HDD,
+                cache
+        ).scan();
+
+        Properties cachedHashes = new Properties();
+        try (InputStream input = Files.newInputStream(cache)) {
+            cachedHashes.load(input);
+        }
+        assertThat(cachedHashes).containsKey(original.toAbsolutePath().normalize().toString());
+        assertThat(cachedHashes).doesNotContainKey(duplicate.toAbsolutePath().normalize().toString());
+        assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.VALIDATING_HASH_CACHE)
+                .extracting(ScanProgress.Snapshot::completed)
+                .endsWith(2L);
+    }
+
+    @Test
     void scanRejectsNonDirectory(@TempDir Path tempDir) throws IOException {
         Path file = Files.writeString(tempDir.resolve("image.jpg"), "content");
         ScanProgress progress = new ScanProgress();
@@ -275,11 +312,12 @@ class FileHelperTest extends TestBase {
         Path mediaRoot = Files.createDirectory(tempDir.resolve("2024-photos"));
         Files.writeString(mediaRoot.resolve("image.jpg"), "content");
         Path expandedFile = Files.writeString(tempDir.resolve("20250524_095600.jpg"), "content");
+        Path secondExpandedFile = Files.writeString(tempDir.resolve("20250524_095601.jpg"), "content");
         List<String> information = new CopyOnWriteArrayList<>();
         ScanProgress progress = new ScanProgress();
         progress.setInformationHandler(information::add);
 
-        ScanResult result = new FileHelper(List.of(expandedFile, mediaRoot), progress).scan();
+        ScanResult result = new FileHelper(List.of(expandedFile, secondExpandedFile, mediaRoot), progress).scan();
 
         assertThat(result.scannedFiles()).isEqualTo(1);
         assertThat(information).containsExactly("Skipping non-directory scan root.");
@@ -316,12 +354,15 @@ class FileHelperTest extends TestBase {
                 .containsSubsequence(
                         ScanProgress.Stage.DISCOVERING,
                         ScanProgress.Stage.GROUPING_BY_SIZE,
+                        ScanProgress.Stage.VALIDATING_HASH_CACHE,
                         ScanProgress.Stage.SAMPLING,
                         ScanProgress.Stage.HASHING,
                         ScanProgress.Stage.FINALIZING,
                         ScanProgress.Stage.COMPLETE
                 );
         assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.GROUPING_BY_SIZE)
+                .allSatisfy(update -> assertThat(update.total()).isEqualTo(2));
+        assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.VALIDATING_HASH_CACHE)
                 .allSatisfy(update -> assertThat(update.total()).isEqualTo(2));
         assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.SAMPLING)
                 .allSatisfy(update -> assertThat(update.total()).isEqualTo(6));
@@ -331,6 +372,7 @@ class FileHelperTest extends TestBase {
                 .allSatisfy(update -> assertThat(update.total()).isEqualTo(1));
         for (ScanProgress.Stage stage : List.of(
                 ScanProgress.Stage.GROUPING_BY_SIZE,
+                ScanProgress.Stage.VALIDATING_HASH_CACHE,
                 ScanProgress.Stage.SAMPLING,
                 ScanProgress.Stage.HASHING,
                 ScanProgress.Stage.FINALIZING
@@ -348,6 +390,7 @@ class FileHelperTest extends TestBase {
         assertThat(result.stageDurations()).containsOnlyKeys(
                 ScanProgress.Stage.DISCOVERING,
                 ScanProgress.Stage.GROUPING_BY_SIZE,
+                ScanProgress.Stage.VALIDATING_HASH_CACHE,
                 ScanProgress.Stage.SAMPLING,
                 ScanProgress.Stage.HASHING,
                 ScanProgress.Stage.FINALIZING

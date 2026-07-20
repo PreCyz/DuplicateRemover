@@ -38,14 +38,27 @@ public class DuplicateFileRemover {
     public static void main(String[] args) {
         try {
             ApplicationArguments arguments = parseArguments(args);
-            startupInfo(arguments.diskType()).forEach(IO::println);
+            startupInfo(arguments.diskType(), arguments.showThumbnail()).forEach(IO::println);
             ScanProgress progress = new ScanProgress();
             ScanResult result;
+            ReportHelper.ReportPreparation reportPreparation;
             try (TerminalProgressBar progressBar = new TerminalProgressBar(progress)) {
-                result = new FileHelper(arguments.roots(), progress, arguments.diskType(), HASH_CACHE_PATH).scan();
+                result = new FileHelper(
+                        arguments.roots(),
+                        progress,
+                        arguments.diskType(),
+                        HASH_CACHE_PATH
+                ).scanForReport(false);
+                reportPreparation = ReportHelper.prepareReport(result, progress, arguments.showThumbnail());
+                result = reportPreparation.scanResult();
             }
 
-            try (ReportServer server = new ReportServer(result, REPORT_PATH, arguments.diskType())) {
+            try (ReportServer server = new ReportServer(
+                    result,
+                    REPORT_PATH,
+                    arguments.diskType(),
+                    reportPreparation.thumbnails()
+            )) {
                 Path report = new ReportHelper(result, REPORT_PATH, server).createReport();
                 server.start();
                 System.out.printf("Scanned %d media files and found %d duplicates (%s).%n",
@@ -72,11 +85,12 @@ public class DuplicateFileRemover {
         );
     }
 
-    static String scanConcurrencyInfo(DiskType diskType) {
+    static String scanConcurrencyInfo(DiskType diskType, boolean showThumbnail) {
         FileHelper.ScanProfile profile = FileHelper.scanProfile(diskType);
-        return "Disk type: %s. Using up to %d traversal, %d sampling, %d hashing, and %d deletion virtual threads."
+        return "Disk type: %s. Show thumbnails: %s. Using up to %d traversal, %d sampling, %d hashing, and %d deletion virtual threads."
                 .formatted(
                         diskType.displayName(),
+                        showThumbnail,
                         profile.traversalWorkers(),
                         profile.samplingWorkers(),
                         profile.hashingWorkers(),
@@ -84,8 +98,8 @@ public class DuplicateFileRemover {
                 );
     }
 
-    static List<String> startupInfo(DiskType diskType) {
-        return List.of(supportedMediaInfo(), scanConcurrencyInfo(diskType));
+    static List<String> startupInfo(DiskType diskType, boolean showThumbnail) {
+        return List.of(supportedMediaInfo(), scanConcurrencyInfo(diskType, showThumbnail));
     }
 
     static String supportedMediaInfo() {
@@ -110,6 +124,8 @@ public class DuplicateFileRemover {
         }
         DiskType diskType = DiskType.HDD;
         boolean diskTypeSpecified = false;
+        boolean showThumbnail = false;
+        boolean showThumbnailSpecified = false;
         List<Path> roots = new ArrayList<>();
         for (int index = 0; index < args.length; index++) {
             String argument = args[index];
@@ -124,6 +140,24 @@ public class DuplicateFileRemover {
                     throw new IllegalArgumentException("Missing value after --disk; expected HDD or NVMe.");
                 }
                 diskValue = args[index];
+            } else if (argument.startsWith("--showThumbnail=")) {
+                if (showThumbnailSpecified) {
+                    throw new IllegalArgumentException("showThumbnail may be specified only once.");
+                }
+                showThumbnail = parseBooleanArgument(
+                        "showThumbnail",
+                        argument.substring("--showThumbnail=".length())
+                );
+                showThumbnailSpecified = true;
+            } else if ("--showThumbnail".equals(argument)) {
+                if (showThumbnailSpecified) {
+                    throw new IllegalArgumentException("showThumbnail may be specified only once.");
+                }
+                if (++index >= args.length) {
+                    throw new IllegalArgumentException("Missing value after --showThumbnail; expected true or false.");
+                }
+                showThumbnail = parseBooleanArgument("showThumbnail", args[index]);
+                showThumbnailSpecified = true;
             } else if (argument.startsWith("--")) {
                 throw new IllegalArgumentException("Unsupported argument: " + argument);
             } else {
@@ -140,7 +174,17 @@ public class DuplicateFileRemover {
         if (roots.isEmpty()) {
             throw new UnsupportedOperationException("Path to folder not specified.");
         }
-        return new ApplicationArguments(List.copyOf(roots), diskType);
+        return new ApplicationArguments(List.copyOf(roots), diskType, showThumbnail);
+    }
+
+    private static boolean parseBooleanArgument(String name, String value) {
+        if ("true".equalsIgnoreCase(value)) {
+            return true;
+        }
+        if ("false".equalsIgnoreCase(value)) {
+            return false;
+        }
+        throw new IllegalArgumentException("Invalid " + name + " value; expected true or false: " + value);
     }
 
     private static List<Path> expandRootArgument(String argument) {
@@ -239,6 +283,6 @@ public class DuplicateFileRemover {
         }
     }
 
-    record ApplicationArguments(List<Path> roots, DiskType diskType) {
+    record ApplicationArguments(List<Path> roots, DiskType diskType, boolean showThumbnail) {
     }
 }

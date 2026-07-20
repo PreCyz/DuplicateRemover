@@ -102,9 +102,12 @@ public final class TerminalProgressBar implements AutoCloseable {
                     snapshot.mediaFilesDiscovered()
             );
             case GROUPING_BY_SIZE -> determinate("Grouping by size", snapshot);
+            case VALIDATING_HASH_CACHE -> determinate("Validating cache", snapshot);
             case SAMPLING -> determinate("Sampling content", snapshot, "samples");
             case HASHING -> determinate("Hashing", snapshot);
             case FINALIZING -> determinate("Finalizing", snapshot);
+            case VERIFYING_DUPLICATES -> determinate("Verifying dups", snapshot);
+            case THUMBNAILS -> determinate("Thumbnails", snapshot);
             case COMPLETE -> String.format(
                     Locale.ROOT,
                     "Scan complete: %,d media files in %,d directories",
@@ -169,7 +172,7 @@ public final class TerminalProgressBar implements AutoCloseable {
         DateTimeFormatter finishTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss", Locale.ROOT)
                 .withZone(clock.getZone());
         String finishTime = finishTimeFormatter.format(clock.instant().plus(remaining));
-        return "%s, about %s remaining, ends around %s".formatted(
+        return "%s, ~%s left, ends %s".formatted(
                 elapsedText,
                 formatActiveDuration(remaining),
                 finishTime
@@ -223,8 +226,10 @@ public final class TerminalProgressBar implements AutoCloseable {
         long total = snapshot.total();
         long completed = Math.min(snapshot.completed(), total);
         int percentage = total == 0 ? 100 : (int) Math.min(100, completed * 100 / total);
-        int filled = percentage * BAR_WIDTH / 100;
-        String bar = "#".repeat(filled) + "-".repeat(BAR_WIDTH - filled);
+        int labelOverflow = Math.max(0, label.length() - 16);
+        int effectiveBarWidth = Math.max(12, BAR_WIDTH - labelOverflow);
+        int filled = percentage * effectiveBarWidth / 100;
+        String bar = "#".repeat(filled) + "-".repeat(effectiveBarWidth - filled);
         return String.format(
                 Locale.ROOT,
                 "%-16s [%s] %3d%%  %,d / %,d %s",

@@ -8,7 +8,7 @@ import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
-import java.security.NoSuchAlgorithmException;
+import java.nio.file.attribute.DosFileAttributeView;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
@@ -19,26 +19,38 @@ import java.util.regex.Pattern;
 
 public final class ReportServer implements AutoCloseable, ReportHelper.ReportLinks {
     private static final String TOKEN_PARAMETER = "token=";
+    private static final String SESSION_HEADER = "X-Report-Session";
     private static final String BOOTSTRAP_CSS_RESOURCE = "/bootstrap.min.css";
     private static final Duration DEFAULT_SESSION_TIMEOUT = Duration.ofSeconds(15);
+    private static final int BULK_DELETION_TIMEOUT_MULTIPLIER = 4;
+    private static final int MAX_PATH_REQUEST_BYTES = 64 * 1024;
+    private static final long[] HDD_DELETE_RETRY_DELAYS_MILLIS = {250, 500, 1_000, 2_000, 4_000, 8_000};
+    private static final long[] NVME_DELETE_RETRY_DELAYS_MILLIS = {100, 200, 400, 800};
     private static final Pattern SESSION_ID = Pattern.compile("[A-Za-z0-9-]{1,64}");
 
     private final HttpServer server;
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     private final ExecutorService deletionExecutor;
     private final int deletionWorkerCount;
-    private final int deletionHashBufferSize;
+    private final long[] deletionRetryDelaysMillis;
     private final ScheduledExecutorService sessionMonitor;
     private final Path reportPath;
     private final Duration sessionTimeout;
+    private final Duration bulkDeletionTimeout;
     private final Consumer<Path> beforeDelete;
+    private final Consumer<Path> beforeMediaSend;
+    private final FileDeletion fileDeletion;
+    private final Map<Path, ReportHelper.Thumbnail> thumbnailsByPath;
     private final Object lifecycleLock = new Object();
     private final String token = UUID.randomUUID().toString();
     private final Map<Path, String> idsByPath = new LinkedHashMap<>();
     private final Map<String, Path> mediaById = new ConcurrentHashMap<>();
-    private final Map<String, RegisteredDuplicate> duplicatesById = new ConcurrentHashMap<>();
-    private final Set<String> deletionsInProgress = ConcurrentHashMap.newKeySet();
+    private final Map<String, ReportHelper.Thumbnail> thumbnailsById = new ConcurrentHashMap<>();
+    private final Set<Path> duplicatePaths = ConcurrentHashMap.newKeySet();
+    private final Map<Path, String> deletionFailureReasons = new ConcurrentHashMap<>();
+    private final Set<Path> deletionsInProgress = ConcurrentHashMap.newKeySet();
     private final Map<String, Long> browserSessions = new ConcurrentHashMap<>();
+    private final Map<String, Long> bulkDeletionSessions = new ConcurrentHashMap<>();
     private final CompletableFuture<Void> browserSessionsEnded = new CompletableFuture<>();
     private final AtomicBoolean browserConnected = new AtomicBoolean();
     private final AtomicBoolean started = new AtomicBoolean();
@@ -47,13 +59,32 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
     private final AtomicLong lastHeartbeatNanos = new AtomicLong();
     private final AtomicLong heartbeatSilenceAtShutdownNanos = new AtomicLong(-1);
     private int activeDeletionRequests;
+    private int activeReportRequests;
 
     public ReportServer(ScanResult scanResult, Path reportPath) throws IOException {
         this(scanResult, reportPath, DiskType.HDD);
     }
 
     public ReportServer(ScanResult scanResult, Path reportPath, DiskType diskType) throws IOException {
-        this(scanResult, reportPath, diskType, DEFAULT_SESSION_TIMEOUT, ignored -> { });
+        this(scanResult, reportPath, diskType, Map.of());
+    }
+
+    public ReportServer(
+            ScanResult scanResult,
+            Path reportPath,
+            DiskType diskType,
+            Map<Path, ReportHelper.Thumbnail> thumbnails
+    ) throws IOException {
+        this(
+                scanResult,
+                reportPath,
+                diskType,
+                DEFAULT_SESSION_TIMEOUT,
+                ignored -> { },
+                ignored -> { },
+                Files::delete,
+                thumbnails
+        );
     }
 
     ReportServer(ScanResult scanResult, Path reportPath, Duration sessionTimeout) throws IOException {
@@ -63,10 +94,11 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
     ReportServer(
             ScanResult scanResult,
             Path reportPath,
+            DiskType diskType,
             Duration sessionTimeout,
             Consumer<Path> beforeDelete
     ) throws IOException {
-        this(scanResult, reportPath, DiskType.HDD, sessionTimeout, beforeDelete);
+        this(scanResult, reportPath, diskType, sessionTimeout, beforeDelete, ignored -> { });
     }
 
     ReportServer(
@@ -74,21 +106,67 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
             Path reportPath,
             DiskType diskType,
             Duration sessionTimeout,
-            Consumer<Path> beforeDelete
+            Consumer<Path> beforeDelete,
+            Consumer<Path> beforeMediaSend
+    ) throws IOException {
+        this(scanResult, reportPath, diskType, sessionTimeout, beforeDelete, beforeMediaSend, Files::delete);
+    }
+
+    ReportServer(
+            ScanResult scanResult,
+            Path reportPath,
+            DiskType diskType,
+            Duration sessionTimeout,
+            Consumer<Path> beforeDelete,
+            Consumer<Path> beforeMediaSend,
+            FileDeletion fileDeletion
+    ) throws IOException {
+        this(
+                scanResult,
+                reportPath,
+                diskType,
+                sessionTimeout,
+                beforeDelete,
+                beforeMediaSend,
+                fileDeletion,
+                Map.of()
+        );
+    }
+
+    ReportServer(
+            ScanResult scanResult,
+            Path reportPath,
+            DiskType diskType,
+            Duration sessionTimeout,
+            Consumer<Path> beforeDelete,
+            Consumer<Path> beforeMediaSend,
+            FileDeletion fileDeletion,
+            Map<Path, ReportHelper.Thumbnail> thumbnails
     ) throws IOException {
         if (sessionTimeout.isZero() || sessionTimeout.isNegative()) {
             throw new IllegalArgumentException("Session timeout must be positive");
         }
         FileHelper.ScanProfile profile = FileHelper.scanProfile(Objects.requireNonNull(diskType, "diskType"));
         this.deletionWorkerCount = profile.deletionWorkers();
-        this.deletionHashBufferSize = profile.deletionHashBufferSize();
+        this.deletionRetryDelaysMillis = deletionRetryDelays(diskType);
         this.deletionExecutor = Executors.newFixedThreadPool(
                 deletionWorkerCount,
                 Thread.ofVirtual().name("duplicate-deletion-", 0).factory()
         );
         this.reportPath = reportPath.toAbsolutePath().normalize();
         this.sessionTimeout = sessionTimeout;
+        this.bulkDeletionTimeout = sessionTimeout.multipliedBy(BULK_DELETION_TIMEOUT_MULTIPLIER);
         this.beforeDelete = Objects.requireNonNull(beforeDelete);
+        this.beforeMediaSend = Objects.requireNonNull(beforeMediaSend);
+        this.fileDeletion = Objects.requireNonNull(fileDeletion);
+        Map<Path, ReportHelper.Thumbnail> normalizedThumbnails = new HashMap<>();
+        Objects.requireNonNull(thumbnails, "thumbnails").forEach((path, thumbnail) ->
+                normalizedThumbnails.put(
+                        path.toAbsolutePath().normalize(),
+                        Objects.requireNonNull(thumbnail, "thumbnail")
+                )
+        );
+        this.thumbnailsByPath = Map.copyOf(normalizedThumbnails);
         this.server = HttpServer.create(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0), 0);
         this.sessionMonitor = Executors.newSingleThreadScheduledExecutor(
                 Thread.ofPlatform().daemon().name("report-session-monitor").factory()
@@ -130,17 +208,13 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
     }
 
     @Override
-    public String bootstrapCssUrl() {
-        return apiBase() + "/assets/bootstrap.min.css?token=" + token;
+    public boolean hasThumbnail(Path path) {
+        return thumbnailsByPath.containsKey(path.toAbsolutePath().normalize());
     }
 
     @Override
-    public String duplicateId(Path path) {
-        String id = idsByPath.get(path.toAbsolutePath().normalize());
-        if (id == null || !duplicatesById.containsKey(id)) {
-            throw new IllegalArgumentException("Path is not a registered duplicate: " + path);
-        }
-        return id;
+    public String bootstrapCssUrl() {
+        return apiBase() + "/assets/bootstrap.min.css?token=" + token;
     }
 
     @Override
@@ -190,12 +264,20 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
             String originalId = "m" + mediaIndex++;
             idsByPath.put(original, originalId);
             mediaById.put(originalId, original);
+            ReportHelper.Thumbnail originalThumbnail = thumbnailsByPath.get(original);
+            if (originalThumbnail != null) {
+                thumbnailsById.put(originalId, originalThumbnail);
+            }
             for (Path duplicate : group.duplicates()) {
                 Path normalized = duplicate.toAbsolutePath().normalize();
                 String duplicateId = "d" + duplicateIndex++;
                 idsByPath.put(normalized, duplicateId);
                 mediaById.put(duplicateId, normalized);
-                duplicatesById.put(duplicateId, new RegisteredDuplicate(normalized, group.fileSize(), group.hash()));
+                ReportHelper.Thumbnail duplicateThumbnail = thumbnailsByPath.get(normalized);
+                if (duplicateThumbnail != null) {
+                    thumbnailsById.put(duplicateId, duplicateThumbnail);
+                }
+                duplicatePaths.add(normalized);
             }
         }
     }
@@ -209,7 +291,12 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
             send(exchange, 403, "Forbidden", "text/plain; charset=utf-8");
             return;
         }
-        sendFile(exchange, reportPath, "text/html; charset=utf-8");
+        beginReportRequest();
+        try {
+            sendFile(exchange, reportPath, "text/html; charset=utf-8");
+        } finally {
+            finishReportRequest();
+        }
     }
 
     private void handleMedia(HttpExchange exchange) throws IOException {
@@ -219,12 +306,17 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
         }
         String id = exchange.getRequestURI().getPath().substring("/media/".length());
         Path media = mediaById.get(id);
-        if (media == null || !Files.isRegularFile(media, LinkOption.NOFOLLOW_LINKS)) {
+        ReportHelper.Thumbnail thumbnail = thumbnailsById.get(id);
+        if (media == null || thumbnail == null) {
             send(exchange, 404, "Media not found", "text/plain; charset=utf-8");
             return;
         }
-        String contentType = Files.probeContentType(media);
-        sendFile(exchange, media, contentType == null ? "application/octet-stream" : contentType);
+        if (!media.equals(mediaById.get(id))) {
+            send(exchange, 404, "Media not found", "text/plain; charset=utf-8");
+            return;
+        }
+        beforeMediaSend.accept(media);
+        sendBytes(exchange, thumbnail.bytes(), thumbnail.contentType());
     }
 
     private void handleAsset(HttpExchange exchange) throws IOException {
@@ -251,7 +343,7 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
             return;
         }
 
-        if (!beginDeletionRequest()) {
+        if (!beginDeletionRequest(exchange)) {
             send(exchange, 503, "Report server is shutting down", "text/plain; charset=utf-8");
             return;
         }
@@ -262,25 +354,36 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
                 removeAllDuplicates(exchange);
                 return;
             }
-            String prefix = "/api/duplicates/";
-            if (!path.startsWith(prefix) || path.length() == prefix.length()) {
+            if (!"/api/duplicates/path".equals(path)) {
                 send(exchange, 404, "Not found", "text/plain; charset=utf-8");
                 return;
             }
-            String id = path.substring(prefix.length());
-            DeleteStatus status = deleteDuplicate(id);
+            Path duplicatePath = readDuplicatePath(exchange);
+            if (duplicatePath == null) {
+                send(exchange, 400, "Invalid duplicate path", "text/plain; charset=utf-8");
+                return;
+            }
+            DeleteStatus status = deleteDuplicate(duplicatePath);
             if (status == DeleteStatus.DELETED) {
                 exchange.sendResponseHeaders(204, -1);
                 exchange.close();
             } else if (status == DeleteStatus.NOT_FOUND) {
-                send(exchange, 404, "Duplicate not found", "text/plain; charset=utf-8");
-            } else if (status == DeleteStatus.CHANGED) {
-                send(exchange, 409, "File changed since the scan and was not removed", "text/plain; charset=utf-8");
+                send(exchange, 404, "Duplicate file no longer exists", "text/plain; charset=utf-8");
+            } else if (status == DeleteStatus.NOT_REGISTERED) {
+                send(exchange, 404, "Path is not a registered duplicate", "text/plain; charset=utf-8");
+            } else if (status == DeleteStatus.NOT_FILE) {
+                send(exchange, 409, "Duplicate path no longer identifies a regular file", "text/plain; charset=utf-8");
+            } else if (status == DeleteStatus.DELETE_FAILED) {
+                String reason = deletionFailureReasons.remove(duplicatePath);
+                String message = reason == null
+                        ? "File could not be removed; it may be open or protected"
+                        : "File could not be removed: " + reason;
+                send(exchange, 409, message, "text/plain; charset=utf-8");
             } else {
                 send(exchange, 409, "Duplicate is already being removed", "text/plain; charset=utf-8");
             }
         } finally {
-            finishDeletionRequest();
+            finishDeletionRequest(exchange);
         }
     }
 
@@ -310,8 +413,20 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
                 browserConnected.set(true);
                 lastHeartbeatNanos.set(now);
                 lastSessionActivityNanos.set(now);
+            } else if ("/api/session/deletion/start".equals(path)) {
+                browserSessions.put(sessionId, now);
+                bulkDeletionSessions.put(sessionId, now);
+                browserConnected.set(true);
+                lastHeartbeatNanos.set(now);
+                lastSessionActivityNanos.set(now);
+            } else if ("/api/session/deletion/finish".equals(path)) {
+                bulkDeletionSessions.remove(sessionId);
+                browserSessions.put(sessionId, now);
+                lastHeartbeatNanos.set(now);
+                lastSessionActivityNanos.set(now);
             } else if ("/api/session/close".equals(path)) {
                 browserSessions.remove(sessionId);
+                bulkDeletionSessions.remove(sessionId);
                 lastSessionActivityNanos.set(now);
             } else {
                 send(exchange, 404, "Not found", "text/plain; charset=utf-8");
@@ -323,52 +438,178 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
     }
 
     private void removeAllDuplicates(HttpExchange exchange) throws IOException {
+        List<Path> duplicatePathsToDelete = List.copyOf(duplicatePaths);
         List<String> deleted = new ArrayList<>();
         List<String> failed = new ArrayList<>();
-        Map<String, Future<DeleteStatus>> deletions = new LinkedHashMap<>();
-        for (String id : List.copyOf(duplicatesById.keySet())) {
-            deletions.put(id, deletionExecutor.submit(() -> deleteDuplicateNow(id)));
+        Map<Path, Future<DeleteStatus>> deletions = new LinkedHashMap<>();
+        for (Path duplicatePath : duplicatePathsToDelete) {
+            deletions.put(duplicatePath, deletionExecutor.submit(() -> deleteDuplicateNow(duplicatePath)));
         }
-        for (Map.Entry<String, Future<DeleteStatus>> deletion : deletions.entrySet()) {
+        for (Map.Entry<Path, Future<DeleteStatus>> deletion : deletions.entrySet()) {
             if (awaitDeletion(deletion.getValue()) == DeleteStatus.DELETED) {
-                String id = deletion.getKey();
-                deleted.add(id);
+                deleted.add(deletion.getKey().toString());
             } else {
-                failed.add(deletion.getKey());
+                failed.add(deletion.getKey().toString());
+                deletionFailureReasons.remove(deletion.getKey());
             }
         }
-        String json = "{\"deletedIds\":" + jsonArray(deleted) + ",\"failedIds\":" + jsonArray(failed) + "}";
+        String json = "{\"deletedPaths\":" + jsonArray(deleted)
+                + ",\"failedPaths\":" + jsonArray(failed) + "}";
         send(exchange, 200, json, "application/json; charset=utf-8");
     }
 
-    private DeleteStatus deleteDuplicate(String id) throws IOException {
-        return awaitDeletion(deletionExecutor.submit(() -> deleteDuplicateNow(id)));
+    private DeleteStatus deleteDuplicate(Path path) throws IOException {
+        return awaitDeletion(deletionExecutor.submit(() -> deleteDuplicateNow(path)));
     }
 
-    private DeleteStatus deleteDuplicateNow(String id) {
-        if (!deletionsInProgress.add(id)) {
+    private DeleteStatus deleteDuplicateNow(Path path) {
+        if (!duplicatePaths.contains(path)) {
+            return DeleteStatus.NOT_REGISTERED;
+        }
+        if (!deletionsInProgress.add(path)) {
             return DeleteStatus.IN_PROGRESS;
         }
+        deletionFailureReasons.remove(path);
         try {
-            RegisteredDuplicate duplicate = duplicatesById.get(id);
-            if (duplicate == null) {
+            if (!duplicatePaths.contains(path)) {
+                return DeleteStatus.NOT_REGISTERED;
+            }
+            if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
                 return DeleteStatus.NOT_FOUND;
             }
-            if (!Files.isRegularFile(duplicate.path(), LinkOption.NOFOLLOW_LINKS)
-                    || Files.size(duplicate.path()) != duplicate.size()
-                    || !FileHelper.getSHAHashForFile(duplicate.path(), deletionHashBufferSize)
-                            .equals(duplicate.hash())) {
-                return DeleteStatus.CHANGED;
+            if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+                return DeleteStatus.NOT_FILE;
             }
-            beforeDelete.accept(duplicate.path());
-            Files.delete(duplicate.path());
-            duplicatesById.remove(id, duplicate);
-            mediaById.remove(id, duplicate.path());
+            beforeDelete.accept(path);
+            try {
+                deleteFileWithRetries(path);
+            } catch (NoSuchFileException exception) {
+                return DeleteStatus.NOT_FOUND;
+            } catch (IOException exception) {
+                String reason = deletionFailureReason(exception);
+                deletionFailureReasons.put(path, reason);
+                System.err.printf(
+                        "Could not remove [%s] after %d attempts: %s%n",
+                        path,
+                        deletionRetryDelaysMillis.length + 1,
+                        reason
+                );
+                return DeleteStatus.DELETE_FAILED;
+            }
+            duplicatePaths.remove(path);
+            String mediaId = idsByPath.get(path);
+            if (mediaId != null) {
+                mediaById.remove(mediaId, path);
+                thumbnailsById.remove(mediaId);
+            }
             return DeleteStatus.DELETED;
-        } catch (IOException | NoSuchAlgorithmException exception) {
-            return DeleteStatus.CHANGED;
         } finally {
-            deletionsInProgress.remove(id);
+            deletionsInProgress.remove(path);
+        }
+    }
+
+    private static Path readDuplicatePath(HttpExchange exchange) throws IOException {
+        byte[] bytes;
+        try (InputStream input = exchange.getRequestBody()) {
+            bytes = input.readNBytes(MAX_PATH_REQUEST_BYTES + 1);
+        }
+        if (bytes.length == 0 || bytes.length > MAX_PATH_REQUEST_BYTES) {
+            return null;
+        }
+        try {
+            Path path = Path.of(new String(bytes, StandardCharsets.UTF_8));
+            return path.isAbsolute() ? path.toAbsolutePath().normalize() : null;
+        } catch (InvalidPathException exception) {
+            return null;
+        }
+    }
+
+    private static String deletionFailureReason(IOException exception) {
+        if (exception instanceof FileSystemException fileSystemException
+                && fileSystemException.getReason() != null
+                && !fileSystemException.getReason().isBlank()) {
+            return fileSystemException.getReason();
+        }
+        if (exception instanceof FileSystemException) {
+            return exception.getClass().getSimpleName()
+                    + " (the filesystem supplied no reason; the file may be open, protected, or unavailable on the network)";
+        }
+        String message = exception.getMessage();
+        return message == null || message.isBlank() ? exception.getClass().getSimpleName() : message;
+    }
+
+    static long deletionRetryWindowMillis(DiskType diskType) {
+        return Arrays.stream(deletionRetryDelays(diskType)).sum();
+    }
+
+    private static long[] deletionRetryDelays(DiskType diskType) {
+        return switch (diskType) {
+            case HDD -> HDD_DELETE_RETRY_DELAYS_MILLIS.clone();
+            case NVME -> NVME_DELETE_RETRY_DELAYS_MILLIS.clone();
+        };
+    }
+
+    private void deleteFileWithRetries(Path path) throws IOException {
+        boolean restoreReadOnly = clearDosReadOnly(path);
+        IOException lastFailure = null;
+        try {
+            for (int attempt = 0; attempt <= deletionRetryDelaysMillis.length; attempt++) {
+                try {
+                    fileDeletion.delete(path);
+                    return;
+                } catch (NoSuchFileException exception) {
+                    throw exception;
+                } catch (IOException exception) {
+                    lastFailure = exception;
+                    if (attempt == deletionRetryDelaysMillis.length) {
+                        break;
+                    }
+                    try {
+                        Thread.sleep(deletionRetryDelaysMillis[attempt]);
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException("Interrupted while retrying duplicate removal", interrupted);
+                    }
+                }
+            }
+            throw Objects.requireNonNull(lastFailure);
+        } catch (IOException exception) {
+            if (restoreReadOnly && Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
+                try {
+                    setDosReadOnly(path, true);
+                } catch (IOException restoreFailure) {
+                    exception.addSuppressed(restoreFailure);
+                }
+            }
+            throw exception;
+        }
+    }
+
+    private static boolean clearDosReadOnly(Path path) {
+        try {
+            DosFileAttributeView attributes = Files.getFileAttributeView(
+                    path,
+                    DosFileAttributeView.class,
+                    LinkOption.NOFOLLOW_LINKS
+            );
+            if (attributes == null || !attributes.readAttributes().isReadOnly()) {
+                return false;
+            }
+            attributes.setReadOnly(false);
+            return true;
+        } catch (IOException | UnsupportedOperationException exception) {
+            return false;
+        }
+    }
+
+    private static void setDosReadOnly(Path path, boolean readOnly) throws IOException {
+        DosFileAttributeView attributes = Files.getFileAttributeView(
+                path,
+                DosFileAttributeView.class,
+                LinkOption.NOFOLLOW_LINKS
+        );
+        if (attributes != null) {
+            attributes.setReadOnly(readOnly);
         }
     }
 
@@ -402,11 +643,16 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
         try {
             long now = System.nanoTime();
             long cutoff = now - sessionTimeout.toNanos();
+            long bulkDeletionCutoff = now - bulkDeletionTimeout.toNanos();
             synchronized (lifecycleLock) {
-                browserSessions.entrySet().removeIf(entry -> entry.getValue() < cutoff);
+                bulkDeletionSessions.entrySet().removeIf(entry -> entry.getValue() < bulkDeletionCutoff);
+                browserSessions.entrySet().removeIf(entry -> entry.getValue() < cutoff
+                        && !bulkDeletionSessions.containsKey(entry.getKey()));
                 if (browserConnected.get()
                         && browserSessions.isEmpty()
+                        && bulkDeletionSessions.isEmpty()
                         && activeDeletionRequests == 0
+                        && activeReportRequests == 0
                         && now - lastSessionActivityNanos.get() >= sessionTimeout.toNanos()) {
                     heartbeatSilenceAtShutdownNanos.compareAndSet(
                             -1,
@@ -420,21 +666,56 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
         }
     }
 
-    private boolean beginDeletionRequest() {
+    private boolean beginDeletionRequest(HttpExchange exchange) {
         synchronized (lifecycleLock) {
             if (browserSessionsEnded.isDone()) {
                 return false;
             }
+            long now = System.nanoTime();
+            String sessionId = exchange.getRequestHeaders().getFirst(SESSION_HEADER);
+            if (sessionId != null && SESSION_ID.matcher(sessionId).matches()) {
+                browserSessions.put(sessionId, now);
+                if (bulkDeletionSessions.containsKey(sessionId)) {
+                    bulkDeletionSessions.put(sessionId, now);
+                }
+                browserConnected.set(true);
+                lastHeartbeatNanos.set(now);
+            }
             activeDeletionRequests++;
-            lastSessionActivityNanos.set(System.nanoTime());
+            lastSessionActivityNanos.set(now);
             return true;
         }
     }
 
-    private void finishDeletionRequest() {
+    private void beginReportRequest() {
+        synchronized (lifecycleLock) {
+            long now = System.nanoTime();
+            activeReportRequests++;
+            browserConnected.set(true);
+            lastSessionActivityNanos.set(now);
+        }
+    }
+
+    private void finishReportRequest() {
+        synchronized (lifecycleLock) {
+            activeReportRequests--;
+            lastSessionActivityNanos.set(System.nanoTime());
+        }
+    }
+
+    private void finishDeletionRequest(HttpExchange exchange) {
         synchronized (lifecycleLock) {
             activeDeletionRequests--;
-            lastSessionActivityNanos.set(System.nanoTime());
+            long now = System.nanoTime();
+            String sessionId = exchange.getRequestHeaders().getFirst(SESSION_HEADER);
+            if (sessionId != null && SESSION_ID.matcher(sessionId).matches()) {
+                browserSessions.put(sessionId, now);
+                if (bulkDeletionSessions.containsKey(sessionId)) {
+                    bulkDeletionSessions.put(sessionId, now);
+                }
+                lastHeartbeatNanos.set(now);
+            }
+            lastSessionActivityNanos.set(now);
         }
     }
 
@@ -457,6 +738,10 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
             }
             bytes = input.readAllBytes();
         }
+        sendBytes(exchange, bytes, contentType);
+    }
+
+    private void sendBytes(HttpExchange exchange, byte[] bytes, String contentType) throws IOException {
         addCommonHeaders(exchange);
         exchange.getResponseHeaders().set("Content-Type", contentType);
         exchange.sendResponseHeaders(200, bytes.length);
@@ -478,21 +763,52 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
     private void addCommonHeaders(HttpExchange exchange) {
         exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
         exchange.getResponseHeaders().set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+        exchange.getResponseHeaders().set("Access-Control-Allow-Headers", SESSION_HEADER);
         exchange.getResponseHeaders().set("Cache-Control", "no-store");
         exchange.getResponseHeaders().set("Referrer-Policy", "no-referrer");
     }
 
     private String jsonArray(List<String> values) {
-        return values.stream().map(value -> "\"" + value + "\"").collect(java.util.stream.Collectors.joining(",", "[", "]"));
+        return values.stream()
+                .map(ReportServer::jsonString)
+                .collect(java.util.stream.Collectors.joining(",", "[", "]"));
     }
 
-    private record RegisteredDuplicate(Path path, long size, String hash) {
+    private static String jsonString(String value) {
+        StringBuilder escaped = new StringBuilder(value.length() + 2).append('"');
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+            switch (character) {
+                case '"' -> escaped.append("\\\"");
+                case '\\' -> escaped.append("\\\\");
+                case '\b' -> escaped.append("\\b");
+                case '\f' -> escaped.append("\\f");
+                case '\n' -> escaped.append("\\n");
+                case '\r' -> escaped.append("\\r");
+                case '\t' -> escaped.append("\\t");
+                default -> {
+                    if (character < 0x20) {
+                        escaped.append("\\u%04x".formatted((int) character));
+                    } else {
+                        escaped.append(character);
+                    }
+                }
+            }
+        }
+        return escaped.append('"').toString();
+    }
+
+    @FunctionalInterface
+    interface FileDeletion {
+        void delete(Path path) throws IOException;
     }
 
     private enum DeleteStatus {
         DELETED,
         NOT_FOUND,
-        CHANGED,
+        NOT_REGISTERED,
+        NOT_FILE,
+        DELETE_FAILED,
         IN_PROGRESS
     }
 }

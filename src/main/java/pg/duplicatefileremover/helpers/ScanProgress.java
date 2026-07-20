@@ -154,9 +154,12 @@ public final class ScanProgress {
         NOT_STARTED,
         DISCOVERING,
         GROUPING_BY_SIZE,
+        VALIDATING_HASH_CACHE,
         SAMPLING,
         HASHING,
         FINALIZING,
+        VERIFYING_DUPLICATES,
+        THUMBNAILS,
         COMPLETE,
         FAILED
     }

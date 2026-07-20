@@ -54,6 +54,18 @@ public class FileHelper {
     }
 
     public ScanResult scan() throws IOException, NoSuchAlgorithmException {
+        return scan(true);
+    }
+
+    public ScanResult scanForReport() throws IOException, NoSuchAlgorithmException {
+        return scanForReport(true);
+    }
+
+    public ScanResult scanForReport(boolean completeProgress) throws IOException, NoSuchAlgorithmException {
+        return ReportHelper.retainExistingFiles(scan(false), progress, completeProgress);
+    }
+
+    private ScanResult scan(boolean completeProgress) throws IOException, NoSuchAlgorithmException {
         long startNanos = System.nanoTime();
         progress.begin(ScanProgress.Stage.DISCOVERING, 0);
         try {
@@ -95,7 +107,9 @@ public class FileHelper {
 
             duplicateGroups.sort(Comparator.comparing(group -> group.original().toString()));
             long scannedFiles = filesBySize.values().stream().mapToLong(List::size).sum();
-            progress.complete();
+            if (completeProgress) {
+                progress.complete();
+            }
             return new ScanResult(
                     scannedFiles,
                     duplicateGroups,
@@ -193,9 +207,9 @@ public class FileHelper {
             }
             throw new IOException("Not a readable directory: " + roots.getFirst());
         }
-        roots.stream()
-                .filter(root -> !Files.isDirectory(root))
-                .forEach(ignored -> progress.information("Skipping non-directory scan root."));
+        if (roots.stream().anyMatch(root -> !Files.isDirectory(root))) {
+            progress.information("Skipping non-directory scan root.");
+        }
 
         for (Path root : readableRoots) {
             enqueueDirectory(root, directories, visitedDirectories, pendingDirectories);
@@ -238,12 +252,58 @@ public class FileHelper {
             ExecutorService executor,
             ConcurrentMap<HashKey, ConcurrentLinkedQueue<FileMetadata>> filesByHash
     ) throws IOException, NoSuchAlgorithmException {
+        List<List<FileMetadata>> duplicateSizeGroups = filesBySize.values().stream()
+                .filter(paths -> paths.size() > 1)
+                .toList();
+        long cacheValidationWork = Math.addExact(
+                duplicateSizeGroups.stream().mapToLong(List::size).sum(),
+                hashCache.size()
+        );
+        progress.begin(ScanProgress.Stage.VALIDATING_HASH_CACHE, cacheValidationWork);
+        hashCache.removeMissingEntries(progress);
+
         List<FileMetadata> candidateList = new ArrayList<>();
-        for (List<FileMetadata> paths : filesBySize.values()) {
-            if (paths.size() > 1 && !addFullyCachedGroup(paths, filesByHash)) {
+        ConcurrentLinkedQueue<CachedCandidate> cachedCandidates = new ConcurrentLinkedQueue<>();
+        for (List<FileMetadata> paths : duplicateSizeGroups) {
+            Map<FileMetadata, String> cachedHashes = new LinkedHashMap<>();
+            for (FileMetadata candidate : paths) {
+                String hash = hashCache.find(candidate);
+                if (hash != null) {
+                    cachedHashes.put(candidate, hash);
+                }
+            }
+            if (cachedHashes.size() == paths.size()) {
+                cachedHashes.forEach((candidate, hash) ->
+                        cachedCandidates.add(new CachedCandidate(candidate, hash)));
+            } else {
                 candidateList.addAll(paths);
+                progress.itemsCompleted(paths.size());
             }
         }
+
+        ConcurrentLinkedQueue<Exception> cacheFailures = new ConcurrentLinkedQueue<>();
+        List<Future<?>> cacheWorkers = startWorkers(executor, scanProfile.samplingWorkers(), () -> {
+            CachedCandidate cachedCandidate;
+            while (cacheFailures.isEmpty() && (cachedCandidate = cachedCandidates.poll()) != null) {
+                try {
+                    FileMetadata candidate = cachedCandidate.file();
+                    ensureMetadataUnchanged(candidate);
+                    filesByHash
+                            .computeIfAbsent(
+                                    new HashKey(candidate.size(), cachedCandidate.hash()),
+                                    ignored -> new ConcurrentLinkedQueue<>()
+                            )
+                            .add(candidate);
+                } catch (IOException exception) {
+                    cacheFailures.add(exception);
+                } finally {
+                    progress.itemCompleted();
+                }
+            }
+        });
+        awaitWorkers(cacheWorkers);
+        throwHashingFailure(cacheFailures.peek());
+
         candidateList = orderForIo(candidateList);
         ConcurrentLinkedQueue<FileMetadata> candidates = new ConcurrentLinkedQueue<>(candidateList);
         long samplingWork = scanProfile.progressiveSampling() ? candidates.size() * 3L : candidates.size();
@@ -290,27 +350,6 @@ public class FileHelper {
                 .filter(paths -> paths.size() > 1)
                 .forEach(fullHashCandidates::addAll);
         return new ConcurrentLinkedQueue<>(orderForIo(fullHashCandidates));
-    }
-
-    private boolean addFullyCachedGroup(
-            List<FileMetadata> candidates,
-            ConcurrentMap<HashKey, ConcurrentLinkedQueue<FileMetadata>> filesByHash
-    ) throws IOException {
-        Map<FileMetadata, String> cachedHashes = new LinkedHashMap<>();
-        for (FileMetadata candidate : candidates) {
-            String hash = hashCache.find(candidate);
-            if (hash == null) {
-                return false;
-            }
-            cachedHashes.put(candidate, hash);
-        }
-        for (FileMetadata candidate : candidates) {
-            ensureMetadataUnchanged(candidate);
-        }
-        cachedHashes.forEach((candidate, hash) -> filesByHash
-                .computeIfAbsent(new HashKey(candidate.size(), hash), ignored -> new ConcurrentLinkedQueue<>())
-                .add(candidate));
-        return true;
     }
 
     private ConcurrentLinkedQueue<FileMetadata> progressivelySampleHddCandidates(
@@ -624,6 +663,24 @@ public class FileHelper {
             return cached.hash();
         }
 
+        private int size() {
+            return entries.size();
+        }
+
+        private void removeMissingEntries(ScanProgress progress) {
+            for (String filePath : List.copyOf(entries.keySet())) {
+                try {
+                    if (!Files.isRegularFile(Path.of(filePath), LinkOption.NOFOLLOW_LINKS)) {
+                        entries.remove(filePath);
+                    }
+                } catch (InvalidPathException exception) {
+                    entries.remove(filePath);
+                } finally {
+                    progress.itemCompleted();
+                }
+            }
+        }
+
         private void put(FileMetadata metadata, String hash) {
             entries.put(metadata.path().toString(), new CachedHash(
                     metadata.size(),
@@ -702,6 +759,9 @@ public class FileHelper {
     }
 
     private record ProgressiveCandidate(FileMetadata file, String groupingKey) {
+    }
+
+    private record CachedCandidate(FileMetadata file, String hash) {
     }
 
     private record CachedHash(long size, long creationMillis, long modifiedMillis, String hash) {

@@ -5,6 +5,43 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="referrer" content="no-referrer">
     <title>Duplicate Media Report</title>
+    <script>
+        window.reportSession = (() => {
+            const apiBase = '${apiBase}';
+            const apiToken = '${apiToken}';
+            const sessionId = typeof crypto.randomUUID === 'function'
+                ? crypto.randomUUID()
+                : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+            const heartbeatUrl = `${apiBase}/api/session/heartbeat?token=${encodeURIComponent(apiToken)}`;
+            const closeSessionUrl = `${apiBase}/api/session/close?token=${encodeURIComponent(apiToken)}`;
+            let heartbeatTimer = null;
+
+            const sendHeartbeat = () => fetch(heartbeatUrl, {
+                method: 'POST',
+                body: sessionId,
+                keepalive: true
+            }).catch(() => {});
+
+            const startBrowserSession = () => {
+                if (heartbeatTimer !== null) return;
+                sendHeartbeat();
+                heartbeatTimer = window.setInterval(sendHeartbeat, 3000);
+            };
+
+            const closeBrowserSession = () => {
+                if (heartbeatTimer !== null) {
+                    window.clearInterval(heartbeatTimer);
+                    heartbeatTimer = null;
+                }
+                navigator.sendBeacon(closeSessionUrl, sessionId);
+            };
+
+            window.addEventListener('pageshow', startBrowserSession);
+            window.addEventListener('pagehide', closeBrowserSession);
+            startBrowserSession();
+            return {apiBase, apiToken, sessionId};
+        })();
+    </script>
     <link href="${bootstrapCssUrl}" rel="stylesheet">
     <style>
         body { background: #f4f7fb; }
@@ -16,7 +53,7 @@
         .original-card { border-left: .3rem solid #198754; }
         .duplicate-card { border-left: .3rem solid #0d6efd; }
         .media-preview { width: 9rem; height: 6rem; flex: 0 0 auto; background: #e9ecef; border-radius: .5rem; overflow: hidden; }
-        .media-preview img, .media-preview video { width: 100%; height: 100%; object-fit: cover; }
+        .media-preview img { width: 100%; height: 100%; object-fit: cover; }
         .path-text { overflow-wrap: anywhere; color: #495057; font-family: var(--bs-font-monospace); font-size: .82rem; }
         .min-width-0 { min-width: 0; }
         code { font-size: .72rem; }
@@ -86,8 +123,7 @@
         integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" crossorigin="anonymous"></script>
 <script>
     (() => {
-        const apiBase = '${apiBase}';
-        const apiToken = '${apiToken}';
+        const {apiBase, apiToken, sessionId} = window.reportSession;
         const deletionWorkerCount = ${deletionWorkerCount};
         const duplicateCount = document.getElementById('duplicate-count');
         const duplicateSpace = document.getElementById('duplicate-space');
@@ -99,36 +135,29 @@
         const progressText = document.getElementById('remove-progress-text');
         const completionToast = document.getElementById('completion-toast');
         const completionToastMessage = document.getElementById('completion-toast-message');
-        const sessionId = typeof crypto.randomUUID === 'function'
-            ? crypto.randomUUID()
-            : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-        const heartbeatUrl = `${apiBase}/api/session/heartbeat?token=${encodeURIComponent(apiToken)}`;
-        const closeSessionUrl = `${apiBase}/api/session/close?token=${encodeURIComponent(apiToken)}`;
-        let heartbeatTimer = null;
-
-        const sendHeartbeat = () => fetch(heartbeatUrl, {
+        const duplicatesTable = document.getElementById('duplicates-table');
+        const duplicateCardsByPath = new Map();
+        let remainingDuplicateBytes = 0;
+        document.querySelectorAll('.duplicate-card').forEach(card => {
+            duplicateCardsByPath.set(card.dataset.duplicatePath, card);
+            remainingDuplicateBytes += Number(card.dataset.bytes);
+        });
+        let remainingDuplicateCount = duplicateCardsByPath.size;
+        const bulkDeletionStartUrl = `${apiBase}/api/session/deletion/start?token=${encodeURIComponent(apiToken)}`;
+        const bulkDeletionFinishUrl = `${apiBase}/api/session/deletion/finish?token=${encodeURIComponent(apiToken)}`;
+        const deletionRequestOptions = path => ({
+            method: 'DELETE',
+            headers: {
+                'Content-Type': 'text/plain; charset=utf-8',
+                'X-Report-Session': sessionId
+            },
+            body: path
+        });
+        const postSessionActivity = url => fetch(url, {
             method: 'POST',
             body: sessionId,
             keepalive: true
-        }).catch(() => {});
-
-        const startBrowserSession = () => {
-            if (heartbeatTimer !== null) return;
-            sendHeartbeat();
-            heartbeatTimer = window.setInterval(sendHeartbeat, 3000);
-        };
-
-        const closeBrowserSession = () => {
-            if (heartbeatTimer !== null) {
-                window.clearInterval(heartbeatTimer);
-                heartbeatTimer = null;
-            }
-            navigator.sendBeacon(closeSessionUrl, sessionId);
-        };
-
-        window.addEventListener('pageshow', startBrowserSession);
-        window.addEventListener('pagehide', closeBrowserSession);
-        startBrowserSession();
+        });
 
         const formatBytes = bytes => {
             if (bytes < 1024) return `${bytes} B`;
@@ -145,42 +174,128 @@
         };
 
         const updateProgress = (processed, total) => {
-            const percentage = total === 0 ? 100 : Math.round(processed * 100 / total);
-            progressBar.style.width = `${percentage}%`;
-            progressBar.textContent = `${percentage}%`;
+            const visualPercentage = total === 0 ? 100 : Math.min(100, processed * 100 / total);
+            const displayedPercentage = Math.round(visualPercentage);
+            progressBar.style.width = `${visualPercentage.toFixed(4)}%`;
+            progressBar.textContent = `${displayedPercentage}%`;
             progressText.textContent = `${processed} / ${total}`;
-            progressContainer.setAttribute('aria-valuenow', String(percentage));
+            progressContainer.setAttribute('aria-valuenow', String(displayedPercentage));
         };
 
         const showCompletionToast = message => {
             completionToastMessage.textContent = message;
-            bootstrap.Toast.getOrCreateInstance(completionToast, {delay: 6000}).show();
+            if (window.bootstrap?.Toast) {
+                bootstrap.Toast.getOrCreateInstance(completionToast, {delay: 6000}).show();
+            } else {
+                showStatus(message, 'success');
+            }
         };
 
-        const removeCard = id => {
-            const card = document.querySelector(`.duplicate-card[data-duplicate-id="${id}"]`);
-            if (!card) return;
-            const bytes = Number(card.dataset.bytes);
-            const group = card.closest('.duplicate-group');
-            card.remove();
-            duplicateCount.textContent = String(Math.max(0, Number(duplicateCount.textContent) - 1));
-            const remainingBytes = Math.max(0, Number(duplicateSpace.dataset.bytes) - bytes);
-            duplicateSpace.dataset.bytes = String(remainingBytes);
-            duplicateSpace.textContent = formatBytes(remainingBytes);
-            if (group && !group.querySelector('.duplicate-card')) group.remove();
-            if (!document.querySelector('.duplicate-card')) {
-                removeAllButton.disabled = true;
-                document.getElementById('duplicates-table').innerHTML = '<tr><td colspan="4" class="text-center py-5 text-secondary">All reported duplicates have been removed.</td></tr>';
+        const updateDuplicateSummary = () => {
+            duplicateCount.textContent = String(remainingDuplicateCount);
+            duplicateSpace.dataset.bytes = String(remainingDuplicateBytes);
+            duplicateSpace.textContent = formatBytes(remainingDuplicateBytes);
+            removeAllButton.disabled = remainingDuplicateCount === 0;
+        };
+
+        let lastUiPaintAt = 0;
+        let scheduledUiPaint = null;
+        const allowBrowserPaint = () => {
+            if (performance.now() - lastUiPaintAt < 100) return Promise.resolve();
+            if (scheduledUiPaint) return scheduledUiPaint;
+            scheduledUiPaint = new Promise(resolve => {
+                const finishPaint = () => {
+                    lastUiPaintAt = performance.now();
+                    scheduledUiPaint = null;
+                    resolve();
+                };
+                if (document.visibilityState === 'visible' && typeof requestAnimationFrame === 'function') {
+                    requestAnimationFrame(finishPaint);
+                } else {
+                    setTimeout(finishPaint, 0);
+                }
+            });
+            return scheduledUiPaint;
+        };
+
+        const pendingCardRemovals = [];
+        const cardRemovalIdleResolvers = [];
+        let nextCardRemovalIndex = 0;
+        let cardRemovalScheduled = false;
+
+        const finishCardRemovalBatch = groups => {
+            groups.forEach(group => {
+                if (!group.querySelector('.duplicate-card')) group.remove();
+            });
+            if (remainingDuplicateCount === 0 && nextCardRemovalIndex >= pendingCardRemovals.length) {
+                duplicatesTable.innerHTML = '<tr><td colspan="4" class="text-center py-5 text-secondary">All reported duplicates have been removed.</td></tr>';
             }
+        };
+
+        const scheduleCardRemovalBatch = callback => {
+            if (document.visibilityState === 'visible' && typeof requestAnimationFrame === 'function') {
+                requestAnimationFrame(callback);
+            } else {
+                setTimeout(callback, 0);
+            }
+        };
+
+        const flushCardRemovalBatch = () => {
+            cardRemovalScheduled = false;
+            const deadline = performance.now() + 8;
+            const affectedGroups = new Set();
+            do {
+                const card = pendingCardRemovals[nextCardRemovalIndex++];
+                const group = card.closest('.duplicate-group');
+                if (group) affectedGroups.add(group);
+                card.remove();
+            } while (nextCardRemovalIndex < pendingCardRemovals.length && performance.now() < deadline);
+            finishCardRemovalBatch(affectedGroups);
+
+            if (nextCardRemovalIndex < pendingCardRemovals.length) {
+                cardRemovalScheduled = true;
+                scheduleCardRemovalBatch(flushCardRemovalBatch);
+                return;
+            }
+
+            pendingCardRemovals.length = 0;
+            nextCardRemovalIndex = 0;
+            cardRemovalIdleResolvers.splice(0).forEach(resolve => resolve());
+        };
+
+        const queueCardRemoval = card => {
+            pendingCardRemovals.push(card);
+            if (!cardRemovalScheduled) {
+                cardRemovalScheduled = true;
+                scheduleCardRemovalBatch(flushCardRemovalBatch);
+            }
+        };
+
+        const waitForCardRemovals = () => cardRemovalScheduled || pendingCardRemovals.length > 0
+            ? new Promise(resolve => cardRemovalIdleResolvers.push(resolve))
+            : Promise.resolve();
+
+        const removeCard = path => {
+            const card = duplicateCardsByPath.get(path);
+            if (!card) return false;
+            const bytes = Number(card.dataset.bytes);
+            duplicateCardsByPath.delete(path);
+            remainingDuplicateCount = Math.max(0, remainingDuplicateCount - 1);
+            remainingDuplicateBytes = Math.max(0, remainingDuplicateBytes - bytes);
+            updateDuplicateSummary();
+            queueCardRemoval(card);
+            return true;
         };
 
         const removeDuplicate = async button => {
             if (!window.confirm('Permanently remove this duplicate file?')) return;
             button.disabled = true;
             try {
-                const response = await fetch(`${apiBase}/api/duplicates/${encodeURIComponent(button.dataset.id)}?token=${encodeURIComponent(apiToken)}`, {method: 'DELETE'});
+                const path = button.dataset.path;
+                const response = await fetch(`${apiBase}/api/duplicates/path?token=${encodeURIComponent(apiToken)}`, deletionRequestOptions(path));
                 if (!response.ok) throw new Error(await response.text());
-                removeCard(button.dataset.id);
+                removeCard(path);
+                await waitForCardRemovals();
                 showStatus('Duplicate file removed.', 'success');
             } catch (error) {
                 button.disabled = false;
@@ -193,11 +308,11 @@
             if (button) removeDuplicate(button);
         });
 
-        removeAllButton.disabled = Number(duplicateCount.textContent) === 0;
+        updateDuplicateSummary();
         removeAllButton.addEventListener('click', async () => {
             if (!window.confirm('Permanently remove every duplicate listed in this report? Origin files will be preserved.')) return;
-            const cards = Array.from(document.querySelectorAll('.duplicate-card'));
-            const total = cards.length;
+            const cards = Array.from(duplicateCardsByPath.values());
+            const total = remainingDuplicateCount;
             if (total === 0) return;
 
             removeAllButton.disabled = true;
@@ -206,35 +321,58 @@
             progressBar.classList.add('progress-bar-animated');
             updateProgress(0, total);
 
+            let bulkDeletionLeaseStarted = false;
+            try {
+                const leaseResponse = await postSessionActivity(bulkDeletionStartUrl);
+                if (!leaseResponse.ok) throw new Error(await leaseResponse.text());
+                bulkDeletionLeaseStarted = true;
+            } catch (error) {
+                removeAllButton.disabled = false;
+                cards.forEach(card => {
+                    const button = card.querySelector('.remove-duplicate');
+                    if (button) button.disabled = false;
+                });
+                progressSection.classList.add('d-none');
+                showStatus(error.message || 'Bulk deletion could not be started.', 'danger');
+                return;
+            }
+
             let deleted = 0;
             let failed = 0;
             let nextCardIndex = 0;
             const removeNext = async () => {
                 while (nextCardIndex < total) {
                     const card = cards[nextCardIndex++];
-                    const id = card.dataset.duplicateId;
+                    const path = card.dataset.duplicatePath;
                     try {
-                        const response = await fetch(`${apiBase}/api/duplicates/${encodeURIComponent(id)}?token=${encodeURIComponent(apiToken)}`, {method: 'DELETE'});
+                        const response = await fetch(`${apiBase}/api/duplicates/path?token=${encodeURIComponent(apiToken)}`, deletionRequestOptions(path));
                         if (!response.ok) throw new Error(await response.text());
-                        removeCard(id);
-                        deleted++;
+                        if (removeCard(path)) deleted++;
                     } catch (error) {
                         failed++;
                         const button = card.querySelector('.remove-duplicate');
                         if (button) button.disabled = false;
                     }
                     updateProgress(deleted + failed, total);
+                    await allowBrowserPaint();
                 }
             };
             const activeWorkers = Math.min(deletionWorkerCount, total);
-            await Promise.all(Array.from({length: activeWorkers}, () => removeNext()));
+            try {
+                await Promise.all(Array.from({length: activeWorkers}, () => removeNext()));
+                await waitForCardRemovals();
+            } finally {
+                if (bulkDeletionLeaseStarted) {
+                    await postSessionActivity(bulkDeletionFinishUrl).catch(() => {});
+                }
+            }
 
             progressBar.classList.remove('progress-bar-animated');
             if (failed === 0) {
                 showCompletionToast(`All ${deleted} duplicate files have been removed.`);
             } else {
                 removeAllButton.disabled = false;
-                showStatus(`${deleted} removed; ${failed} changed or unavailable and were preserved.`, 'warning');
+                showStatus(`${deleted} removed; ${failed} unavailable files were preserved.`, 'warning');
             }
         });
     })();

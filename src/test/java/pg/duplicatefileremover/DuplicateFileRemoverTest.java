@@ -35,8 +35,8 @@ public class DuplicateFileRemoverTest {
     void reportsTheConfiguredScanConcurrency() {
         FileHelper.ScanProfile profile = FileHelper.scanProfile(DiskType.HDD);
 
-        assertThat(DuplicateFileRemover.scanConcurrencyInfo(DiskType.HDD))
-                .isEqualTo("Disk type: HDD. Using up to %d traversal, %d sampling, %d hashing, and %d deletion virtual threads."
+        assertThat(DuplicateFileRemover.scanConcurrencyInfo(DiskType.HDD, false))
+                .isEqualTo("Disk type: HDD. Show thumbnails: false. Using up to %d traversal, %d sampling, %d hashing, and %d deletion virtual threads."
                         .formatted(
                                 profile.traversalWorkers(),
                                 profile.samplingWorkers(),
@@ -51,9 +51,9 @@ public class DuplicateFileRemoverTest {
                 + ".jpeg, .jpg, .png, .gif, .bmp, .webp, .mov, .3gp, .mp4, .m4v.";
 
         assertThat(DuplicateFileRemover.supportedMediaInfo()).isEqualTo(mediaInfo);
-        assertThat(DuplicateFileRemover.startupInfo(DiskType.HDD)).containsExactly(
+        assertThat(DuplicateFileRemover.startupInfo(DiskType.HDD, true)).containsExactly(
                 mediaInfo,
-                DuplicateFileRemover.scanConcurrencyInfo(DiskType.HDD)
+                DuplicateFileRemover.scanConcurrencyInfo(DiskType.HDD, true)
         );
     }
 
@@ -64,6 +64,7 @@ public class DuplicateFileRemoverTest {
         );
 
         assertThat(arguments.diskType()).isEqualTo(DiskType.HDD);
+        assertThat(arguments.showThumbnail()).isFalse();
         assertThat(arguments.roots()).containsExactly(Path.of("first"), Path.of("second"));
     }
 
@@ -73,6 +74,28 @@ public class DuplicateFileRemoverTest {
                 .isEqualTo(DiskType.NVME);
         assertThat(DuplicateFileRemover.parseArguments(new String[]{"--disk", "hdd", "photos"}).diskType())
                 .isEqualTo(DiskType.HDD);
+    }
+
+    @Test
+    void acceptsBothShowThumbnailArgumentForms() {
+        assertThat(DuplicateFileRemover.parseArguments(
+                new String[]{"--showThumbnail=true", "photos"}
+        ).showThumbnail()).isTrue();
+        assertThat(DuplicateFileRemover.parseArguments(
+                new String[]{"--showThumbnail", "FALSE", "photos"}
+        ).showThumbnail()).isFalse();
+    }
+
+    @Test
+    void rejectsInvalidOrRepeatedShowThumbnailArguments() {
+        assertThatThrownBy(() -> DuplicateFileRemover.parseArguments(
+                new String[]{"--showThumbnail=yes", "photos"}
+        )).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("expected true or false");
+        assertThatThrownBy(() -> DuplicateFileRemover.parseArguments(
+                new String[]{"--showThumbnail=true", "--showThumbnail=false", "photos"}
+        )).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("only once");
     }
 
     @Test

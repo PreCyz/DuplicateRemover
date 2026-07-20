@@ -29,10 +29,31 @@ class TerminalProgressBarTest {
                 .contains("3 / 4 files");
 
         assertThat(TerminalProgressBar.format(
+                new ScanProgress.Snapshot(ScanProgress.Stage.VALIDATING_HASH_CACHE, 2, 4, 12, 345),
+                0
+        )).contains("Validating cache")
+                .contains("50%")
+                .contains("2 / 4 files");
+
+        assertThat(TerminalProgressBar.format(
                 new ScanProgress.Snapshot(ScanProgress.Stage.SAMPLING, 3, 6, 12, 345),
                 0
         )).contains("50%")
                 .contains("3 / 6 samples");
+
+        assertThat(TerminalProgressBar.format(
+                new ScanProgress.Snapshot(ScanProgress.Stage.VERIFYING_DUPLICATES, 3, 4, 12, 345),
+                0
+        )).contains("Verifying dups")
+                .contains("75%")
+                .contains("3 / 4 files");
+
+        assertThat(TerminalProgressBar.format(
+                new ScanProgress.Snapshot(ScanProgress.Stage.THUMBNAILS, 3, 4, 12, 345),
+                0
+        )).contains("Thumbnails")
+                .contains("75%")
+                .contains("3 / 4 files");
 
         assertThat(TerminalProgressBar.formatDuration(Duration.ofMinutes(1)
                 .plusSeconds(2)
@@ -95,7 +116,29 @@ class TerminalProgressBarTest {
                 Duration.ofSeconds(10),
                 5,
                 clock
-        )).isEqualTo("10s elapsed, about 15s remaining, ends around 10:00:15");
+        )).isEqualTo("10s elapsed, ~15s left, ends 10:00:15");
+    }
+
+    @Test
+    void cacheValidationProgressWithEtaFitsOnOneTerminalLine() {
+        Clock clock = Clock.fixed(Instant.parse("2026-07-20T10:00:00Z"), ZoneOffset.UTC);
+        ScanProgress.Snapshot snapshot = new ScanProgress.Snapshot(
+                ScanProgress.Stage.VALIDATING_HASH_CACHE,
+                1_029,
+                25_765,
+                196,
+                33_689
+        );
+        String line = "%s (%s)".formatted(
+                TerminalProgressBar.format(snapshot, 0),
+                TerminalProgressBar.formatActiveTiming(snapshot, Duration.ofSeconds(5), 193, clock)
+        );
+
+        assertThat(line)
+                .contains("Validating cache")
+                .contains("1,029 / 25,765 files")
+                .contains("ends 10:02:09")
+                .hasSizeLessThanOrEqualTo(120);
     }
 
     @Test
@@ -211,6 +254,10 @@ class TerminalProgressBarTest {
             progress.itemCompleted();
             progress.begin(ScanProgress.Stage.FINALIZING, 1);
             progress.itemCompleted();
+            progress.begin(ScanProgress.Stage.VERIFYING_DUPLICATES, 1);
+            progress.itemCompleted();
+            progress.begin(ScanProgress.Stage.THUMBNAILS, 1);
+            progress.itemCompleted();
             progress.complete();
         }
 
@@ -221,7 +268,7 @@ class TerminalProgressBarTest {
                 .map(line -> line.substring(line.lastIndexOf('\r') + 1).stripTrailing())
                 .toList();
         assertThat(visibleLines)
-                .hasSize(7)
+                .hasSize(9)
                 .satisfiesExactly(
                         line -> assertThat(line).isEqualTo("Preparing scan..."),
                         line -> assertThat(line).startsWith("Discovering").endsWith("(0ms)"),
@@ -231,6 +278,10 @@ class TerminalProgressBarTest {
                         line -> assertThat(line).startsWith("Sampling content").contains("100%").endsWith("(0ms)"),
                         line -> assertThat(line).startsWith("Hashing").contains("100%").endsWith("(0ms)"),
                         line -> assertThat(line).startsWith("Finalizing").contains("100%").endsWith("(0ms)"),
+                        line -> assertThat(line).startsWith("Verifying dups")
+                                .contains("100%").endsWith("(0ms)"),
+                        line -> assertThat(line).startsWith("Thumbnails")
+                                .contains("100%").endsWith("(0ms)"),
                         line -> assertThat(line).startsWith("Scan complete")
                 );
     }
