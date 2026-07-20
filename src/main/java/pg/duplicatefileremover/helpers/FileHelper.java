@@ -328,21 +328,24 @@ public class FileHelper {
             activeCandidates.sort(Comparator.comparing(candidate -> candidate.file().path().toString()));
             Map<String, List<ProgressiveCandidate>> candidatesByFingerprint = new LinkedHashMap<>();
             for (ProgressiveCandidate candidate : activeCandidates) {
-                try {
-                    String fingerprint = getSampledFingerprint(candidate.file(), digest, sample, round);
-                    String groupingKey = candidate.groupingKey() + ':' + fingerprint;
-                    candidatesByFingerprint.computeIfAbsent(groupingKey, ignored -> new ArrayList<>())
-                            .add(new ProgressiveCandidate(candidate.file(), groupingKey));
-                } finally {
-                    if (round == 0) {
-                        progress.itemCompleted();
-                    }
+                String fingerprint = getSampledFingerprint(candidate.file(), digest, sample, round);
+                String groupingKey = candidate.groupingKey() + ':' + fingerprint;
+                candidatesByFingerprint.computeIfAbsent(groupingKey, ignored -> new ArrayList<>())
+                        .add(new ProgressiveCandidate(candidate.file(), groupingKey));
+            }
+
+            boolean finalRound = round == 2;
+            List<ProgressiveCandidate> remainingCandidates = new ArrayList<>();
+            for (List<ProgressiveCandidate> fingerprintGroup : candidatesByFingerprint.values()) {
+                boolean requiresMoreWork = fingerprintGroup.size() > 1;
+                if (!requiresMoreWork || finalRound) {
+                    fingerprintGroup.forEach(ignored -> progress.itemCompleted());
+                }
+                if (requiresMoreWork) {
+                    remainingCandidates.addAll(fingerprintGroup);
                 }
             }
-            activeCandidates = candidatesByFingerprint.values().stream()
-                    .filter(group -> group.size() > 1)
-                    .flatMap(Collection::stream)
-                    .collect(Collectors.toCollection(ArrayList::new));
+            activeCandidates = remainingCandidates;
         }
         activeCandidates.stream().map(ProgressiveCandidate::file).forEach(fullHashCandidates::add);
         return new ConcurrentLinkedQueue<>(orderForIo(fullHashCandidates));

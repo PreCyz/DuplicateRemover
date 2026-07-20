@@ -5,14 +5,14 @@ import org.junit.jupiter.api.io.TempDir;
 import pg.duplicatefileremover.DiskType;
 import pg.duplicatefileremover.TestBase;
 
-import java.io.File;
-import java.io.IOException;
+import java.io.*;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributeView;
 import java.nio.file.attribute.FileTime;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -170,6 +170,35 @@ class FileHelperTest extends TestBase {
             assertThat(group.original()).isNotEqualTo(different.toAbsolutePath());
             assertThat(group.duplicates()).doesNotContain(different.toAbsolutePath());
         });
+    }
+
+    @Test
+    void progressiveHddSamplingReachesOneHundredPercentOnlyAfterAllSampleReads(@TempDir Path tempDir)
+            throws Exception {
+        int fileSize = 512 * 1024;
+        byte[] matchingContent = new byte[fileSize];
+        byte[] differentContent = matchingContent.clone();
+        differentContent[fileSize / 2] = 1;
+        Files.write(tempDir.resolve("original.jpg"), matchingContent);
+        Files.write(tempDir.resolve("duplicate.jpg"), matchingContent);
+        Path different = Files.write(tempDir.resolve("different.jpg"), differentContent);
+        AtomicBoolean removedAtOneHundredPercent = new AtomicBoolean();
+        ScanProgress progress = new ScanProgress(update -> {
+            if (update.stage() == ScanProgress.Stage.SAMPLING
+                    && update.total() == 3
+                    && update.completed() == update.total()) {
+                try {
+                    removedAtOneHundredPercent.set(Files.deleteIfExists(different));
+                } catch (IOException exception) {
+                    throw new UncheckedIOException(exception);
+                }
+            }
+        });
+
+        ScanResult result = new FileHelper(List.of(tempDir), progress, DiskType.HDD, null).scan();
+
+        assertThat(removedAtOneHundredPercent).isTrue();
+        assertThat(result.duplicateCount()).isEqualTo(1);
     }
 
     @Test
