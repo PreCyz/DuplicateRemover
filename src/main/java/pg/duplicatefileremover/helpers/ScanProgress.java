@@ -15,6 +15,7 @@ public final class ScanProgress {
     private final AtomicLong directoriesProcessed = new AtomicLong();
     private final AtomicLong mediaFilesDiscovered = new AtomicLong();
     private final AtomicReference<Consumer<String>> warningHandler = new AtomicReference<>(System.err::println);
+    private final AtomicReference<Consumer<String>> informationHandler = new AtomicReference<>(System.out::println);
     private final CopyOnWriteArrayList<Consumer<Snapshot>> listeners = new CopyOnWriteArrayList<>();
     private final EnumMap<Stage, Duration> stageDurations = new EnumMap<>(Stage.class);
     private final LongSupplier nanoTime;
@@ -63,7 +64,14 @@ public final class ScanProgress {
     }
 
     void itemCompleted() {
-        completed.incrementAndGet();
+        itemsCompleted(1);
+    }
+
+    void itemsCompleted(long count) {
+        if (count <= 0) {
+            return;
+        }
+        completed.addAndGet(count);
         publish();
     }
 
@@ -86,12 +94,24 @@ public final class ScanProgress {
         warningHandler.get().accept(message);
     }
 
+    void information(String message) {
+        informationHandler.get().accept(message);
+    }
+
     void setWarningHandler(Consumer<String> handler) {
         warningHandler.set(Objects.requireNonNull(handler, "handler"));
     }
 
     void resetWarningHandler() {
         warningHandler.set(System.err::println);
+    }
+
+    void setInformationHandler(Consumer<String> handler) {
+        informationHandler.set(Objects.requireNonNull(handler, "handler"));
+    }
+
+    void resetInformationHandler() {
+        informationHandler.set(System.out::println);
     }
 
     void addListener(Consumer<Snapshot> listener) {

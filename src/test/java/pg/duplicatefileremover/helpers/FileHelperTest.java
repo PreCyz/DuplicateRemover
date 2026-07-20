@@ -117,7 +117,7 @@ class FileHelperTest extends TestBase {
 
         assertThat(result.duplicateGroups()).isEmpty();
         assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.SAMPLING)
-                .allSatisfy(update -> assertThat(update.total()).isEqualTo(2));
+                .allSatisfy(update -> assertThat(update.total()).isEqualTo(6));
         assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.HASHING)
                 .allSatisfy(update -> assertThat(update.total()).isZero());
     }
@@ -155,10 +155,11 @@ class FileHelperTest extends TestBase {
         Path original = Files.write(tempDir.resolve("original.jpg"), matchingContent);
         Path duplicate = Files.write(tempDir.resolve("duplicate.jpg"), matchingContent);
         Path different = Files.write(tempDir.resolve("different.jpg"), differentContent);
+        List<ScanProgress.Snapshot> updates = new CopyOnWriteArrayList<>();
 
         ScanResult result = new FileHelper(
                 List.of(tempDir),
-                new ScanProgress(),
+                new ScanProgress(updates::add),
                 DiskType.HDD,
                 null
         ).scan();
@@ -170,6 +171,10 @@ class FileHelperTest extends TestBase {
             assertThat(group.original()).isNotEqualTo(different.toAbsolutePath());
             assertThat(group.duplicates()).doesNotContain(different.toAbsolutePath());
         });
+        assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.SAMPLING)
+                .extracting(ScanProgress.Snapshot::completed)
+                .startsWith(0L, 1L, 2L, 3L)
+                .endsWith(9L);
     }
 
     @Test
@@ -185,7 +190,7 @@ class FileHelperTest extends TestBase {
         AtomicBoolean removedAtOneHundredPercent = new AtomicBoolean();
         ScanProgress progress = new ScanProgress(update -> {
             if (update.stage() == ScanProgress.Stage.SAMPLING
-                    && update.total() == 3
+                    && update.total() == 9
                     && update.completed() == update.total()) {
                 try {
                     removedAtOneHundredPercent.set(Files.deleteIfExists(different));
@@ -265,6 +270,22 @@ class FileHelperTest extends TestBase {
     }
 
     @Test
+    void scanReportsNonDirectoryRootAsInformationWhenReadableDirectoryRootExists(@TempDir Path tempDir)
+            throws Exception {
+        Path mediaRoot = Files.createDirectory(tempDir.resolve("2024-photos"));
+        Files.writeString(mediaRoot.resolve("image.jpg"), "content");
+        Path expandedFile = Files.writeString(tempDir.resolve("20250524_095600.jpg"), "content");
+        List<String> information = new CopyOnWriteArrayList<>();
+        ScanProgress progress = new ScanProgress();
+        progress.setInformationHandler(information::add);
+
+        ScanResult result = new FileHelper(List.of(expandedFile, mediaRoot), progress).scan();
+
+        assertThat(result.scannedFiles()).isEqualTo(1);
+        assertThat(information).containsExactly("Skipping non-directory scan root.");
+    }
+
+    @Test
     void scanDeduplicatesOverlappingRootsWhileProcessingNestedDirectories(@TempDir Path tempDir) throws Exception {
         Path nested = Files.createDirectories(tempDir.resolve("nested").resolve("deeper"));
         Path original = Files.writeString(tempDir.resolve("original.jpg"), "same");
@@ -303,7 +324,7 @@ class FileHelperTest extends TestBase {
         assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.GROUPING_BY_SIZE)
                 .allSatisfy(update -> assertThat(update.total()).isEqualTo(2));
         assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.SAMPLING)
-                .allSatisfy(update -> assertThat(update.total()).isEqualTo(2));
+                .allSatisfy(update -> assertThat(update.total()).isEqualTo(6));
         assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.HASHING)
                 .allSatisfy(update -> assertThat(update.total()).isEqualTo(2));
         assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.FINALIZING)

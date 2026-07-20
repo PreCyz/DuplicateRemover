@@ -28,6 +28,12 @@ class TerminalProgressBarTest {
                 .contains("75%")
                 .contains("3 / 4 files");
 
+        assertThat(TerminalProgressBar.format(
+                new ScanProgress.Snapshot(ScanProgress.Stage.SAMPLING, 3, 6, 12, 345),
+                0
+        )).contains("50%")
+                .contains("3 / 6 samples");
+
         assertThat(TerminalProgressBar.formatDuration(Duration.ofMinutes(1)
                 .plusSeconds(2)
                 .plusMillis(541)))
@@ -116,6 +122,25 @@ class TerminalProgressBarTest {
                 .contains("Warning: Skipping unreadable path [example]")
                 .contains("Discovering")
                 .endsWith(System.lineSeparator());
+    }
+
+    @Test
+    void informationIsPrintedWithoutWarningPrefix() {
+        ScanProgress progress = new ScanProgress();
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+
+        try (TerminalProgressBar ignored = new TerminalProgressBar(
+                progress,
+                new PrintStream(bytes, true, StandardCharsets.UTF_8),
+                true
+        )) {
+            progress.begin(ScanProgress.Stage.DISCOVERING, 0);
+            progress.information("Skipping non-directory scan root.");
+        }
+
+        assertThat(bytes.toString(StandardCharsets.UTF_8))
+                .contains("Skipping non-directory scan root.")
+                .doesNotContain("Warning: Skipping non-directory scan root");
     }
 
     @Test

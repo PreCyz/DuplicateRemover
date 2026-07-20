@@ -149,8 +149,19 @@ public class DuplicateFileRemover {
         }
 
         int separator = Math.max(argument.lastIndexOf('/'), argument.lastIndexOf('\\'));
-        String parentText = separator < 0 ? "." : argument.substring(0, separator + 1);
-        String directoryPattern = argument.substring(separator + 1);
+        boolean driveRelativePattern = separator < 0
+                && argument.length() > 2
+                && Character.isLetter(argument.charAt(0))
+                && argument.charAt(1) == ':';
+        String parentText;
+        String directoryPattern;
+        if (driveRelativePattern) {
+            parentText = argument.substring(0, 2) + FileSystems.getDefault().getSeparator();
+            directoryPattern = argument.substring(2);
+        } else {
+            parentText = separator < 0 ? "." : argument.substring(0, separator + 1);
+            directoryPattern = argument.substring(separator + 1);
+        }
         if (directoryPattern.isEmpty() || containsWildcard(parentText)) {
             throw new IllegalArgumentException(
                     "Wildcards are supported only in the final directory name: " + argument

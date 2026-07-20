@@ -49,6 +49,7 @@ public final class TerminalProgressBar implements AutoCloseable {
         );
         progress.addListener(progressListener);
         progress.setWarningHandler(this::printWarning);
+        progress.setInformationHandler(this::printInformation);
         render();
         renderer.scheduleAtFixedRate(this::renderSafely, 100, 100, TimeUnit.MILLISECONDS);
     }
@@ -65,6 +66,7 @@ public final class TerminalProgressBar implements AutoCloseable {
             output.flush();
         }
         progress.resetWarningHandler();
+        progress.resetInformationHandler();
     }
 
     static String format(ScanProgress.Snapshot snapshot, int frame) {
@@ -78,7 +80,7 @@ public final class TerminalProgressBar implements AutoCloseable {
                     snapshot.mediaFilesDiscovered()
             );
             case GROUPING_BY_SIZE -> determinate("Grouping by size", snapshot);
-            case SAMPLING -> determinate("Sampling content", snapshot);
+            case SAMPLING -> determinate("Sampling content", snapshot, "samples");
             case HASHING -> determinate("Hashing", snapshot);
             case FINALIZING -> determinate("Finalizing", snapshot);
             case COMPLETE -> String.format(
@@ -152,6 +154,10 @@ public final class TerminalProgressBar implements AutoCloseable {
     }
 
     private static String determinate(String label, ScanProgress.Snapshot snapshot) {
+        return determinate(label, snapshot, "files");
+    }
+
+    private static String determinate(String label, ScanProgress.Snapshot snapshot, String unit) {
         long total = snapshot.total();
         long completed = Math.min(snapshot.completed(), total);
         int percentage = total == 0 ? 100 : (int) Math.min(100, completed * 100 / total);
@@ -159,12 +165,13 @@ public final class TerminalProgressBar implements AutoCloseable {
         String bar = "#".repeat(filled) + "-".repeat(BAR_WIDTH - filled);
         return String.format(
                 Locale.ROOT,
-                "%-16s [%s] %3d%%  %,d / %,d files",
+                "%-16s [%s] %3d%%  %,d / %,d %s",
                 label,
                 bar,
                 percentage,
                 completed,
-                total
+                total,
+                unit
         );
     }
 
@@ -261,12 +268,20 @@ public final class TerminalProgressBar implements AutoCloseable {
     }
 
     private synchronized void printWarning(String message) {
+        printMessage("Warning: " + message);
+    }
+
+    private synchronized void printInformation(String message) {
+        printMessage(message);
+    }
+
+    private void printMessage(String message) {
         if (interactive) {
             output.print('\r');
             output.print(" ".repeat(previousLength));
             output.print('\r');
         }
-        output.println("Warning: " + message);
+        output.println(message);
         previousLength = 0;
         lastPrintedStage = null;
         if (interactive) {

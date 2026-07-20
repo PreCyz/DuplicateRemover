@@ -184,10 +184,20 @@ public class FileHelper {
         Phaser pendingDirectories = new Phaser(1);
         AtomicBoolean traversalComplete = new AtomicBoolean();
 
-        for (Path root : roots) {
-            if (!Files.isDirectory(root)) {
-                throw new IOException("Not a readable directory: " + root);
+        List<Path> readableRoots = roots.stream()
+                .filter(Files::isDirectory)
+                .toList();
+        if (readableRoots.isEmpty()) {
+            if (roots.isEmpty()) {
+                throw new IOException("No readable scan directories were provided.");
             }
+            throw new IOException("Not a readable directory: " + roots.getFirst());
+        }
+        roots.stream()
+                .filter(root -> !Files.isDirectory(root))
+                .forEach(ignored -> progress.information("Skipping non-directory scan root."));
+
+        for (Path root : readableRoots) {
             enqueueDirectory(root, directories, visitedDirectories, pendingDirectories);
         }
 
@@ -236,7 +246,8 @@ public class FileHelper {
         }
         candidateList = orderForIo(candidateList);
         ConcurrentLinkedQueue<FileMetadata> candidates = new ConcurrentLinkedQueue<>(candidateList);
-        progress.begin(ScanProgress.Stage.SAMPLING, candidates.size());
+        long samplingWork = scanProfile.progressiveSampling() ? candidates.size() * 3L : candidates.size();
+        progress.begin(ScanProgress.Stage.SAMPLING, samplingWork);
 
         if (scanProfile.progressiveSampling()) {
             return progressivelySampleHddCandidates(candidateList);
@@ -310,7 +321,7 @@ public class FileHelper {
         for (FileMetadata candidate : candidates) {
             if (candidate.size() <= FINGERPRINT_MIN_FILE_SIZE) {
                 fullHashCandidates.add(candidate);
-                progress.itemCompleted();
+                progress.itemsCompleted(3);
             } else {
                 largeFilesBySize.computeIfAbsent(candidate.size(), ignored -> new ArrayList<>()).add(candidate);
             }
@@ -329,17 +340,17 @@ public class FileHelper {
             Map<String, List<ProgressiveCandidate>> candidatesByFingerprint = new LinkedHashMap<>();
             for (ProgressiveCandidate candidate : activeCandidates) {
                 String fingerprint = getSampledFingerprint(candidate.file(), digest, sample, round);
+                progress.itemCompleted();
                 String groupingKey = candidate.groupingKey() + ':' + fingerprint;
                 candidatesByFingerprint.computeIfAbsent(groupingKey, ignored -> new ArrayList<>())
                         .add(new ProgressiveCandidate(candidate.file(), groupingKey));
             }
 
-            boolean finalRound = round == 2;
             List<ProgressiveCandidate> remainingCandidates = new ArrayList<>();
             for (List<ProgressiveCandidate> fingerprintGroup : candidatesByFingerprint.values()) {
                 boolean requiresMoreWork = fingerprintGroup.size() > 1;
-                if (!requiresMoreWork || finalRound) {
-                    fingerprintGroup.forEach(ignored -> progress.itemCompleted());
+                if (!requiresMoreWork && round < 2) {
+                    progress.itemsCompleted((long) fingerprintGroup.size() * (2 - round));
                 }
                 if (requiresMoreWork) {
                     remainingCandidates.addAll(fingerprintGroup);

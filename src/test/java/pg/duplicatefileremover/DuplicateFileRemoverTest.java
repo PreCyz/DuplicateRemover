@@ -79,14 +79,16 @@ public class DuplicateFileRemoverTest {
     void expandsMatchingRootDirectoriesAndScansTheirUnrestrictedDescendants(@TempDir Path tempDir)
             throws Exception {
         Path firstRoot = Files.createDirectories(tempDir.resolve("2023-photos").resolve("family"));
-        Path secondRoot = Files.createDirectories(tempDir.resolve("2024-videos").resolve("any-name"));
+        Path secondRoot = Files.createDirectories(tempDir.resolve("wakacje").resolve("any-name"));
         Path excludedRoot = Files.createDirectories(tempDir.resolve("archive").resolve("2022"));
         Files.writeString(firstRoot.resolve("original.jpg"), "same");
         Files.writeString(secondRoot.resolve("duplicate.jpg"), "same");
         Files.writeString(excludedRoot.resolve("excluded.jpg"), "same");
+        Files.writeString(tempDir.resolve("20250524_095600.jpg"), "same");
+        Files.writeString(tempDir.resolve("wakacje.jpg"), "same");
 
         DuplicateFileRemover.ApplicationArguments arguments = DuplicateFileRemover.parseArguments(
-                new String[]{wildcardRoot(tempDir, "20*")}
+                new String[]{wildcardRoot(tempDir, "20*"), wildcardRoot(tempDir, "wak*")}
         );
         ScanResult result = new FileHelper(
                 arguments.roots(),
@@ -97,7 +99,7 @@ public class DuplicateFileRemoverTest {
 
         assertThat(arguments.roots()).containsExactly(
                 tempDir.resolve("2023-photos").toAbsolutePath().normalize(),
-                tempDir.resolve("2024-videos").toAbsolutePath().normalize()
+                tempDir.resolve("wakacje").toAbsolutePath().normalize()
         );
         assertThat(result.scannedFiles()).isEqualTo(2);
         assertThat(result.duplicateCount()).isEqualTo(1);

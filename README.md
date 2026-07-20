@@ -37,6 +37,8 @@ The final directory name may contain `*` or `?` wildcards. Matching directories 
 java -jar target/DuplicateFileRemover-1.0-SNAPSHOT.jar "A:\20*"
 ```
 
+On Windows, a wildcard directly after a drive letter is also treated as rooted, so `A:fotki*` is equivalent to `A:\fotki*`. Wildcards select directories only; matching files at the same level are ignored.
+
 On Windows, the bundled launcher accepts the same directory arguments:
 
 ```powershell
