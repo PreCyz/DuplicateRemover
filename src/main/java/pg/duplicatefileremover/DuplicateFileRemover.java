@@ -9,7 +9,7 @@ import java.nio.file.Path;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.LocalTime;
-import java.util.ArrayList;
+import java.util.*;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -37,7 +37,7 @@ public class DuplicateFileRemover {
     public static void main(String[] args) {
         try {
             ApplicationArguments arguments = parseArguments(args);
-            IO.println(scanConcurrencyInfo(arguments.diskType()));
+            startupInfo(arguments.diskType()).forEach(IO::println);
             ScanProgress progress = new ScanProgress();
             ScanResult result;
             try (TerminalProgressBar progressBar = new TerminalProgressBar(progress)) {
@@ -81,6 +81,17 @@ public class DuplicateFileRemover {
                         profile.hashingWorkers(),
                         profile.deletionWorkers()
                 );
+    }
+
+    static List<String> startupInfo(DiskType diskType) {
+        return List.of(supportedMediaInfo(), scanConcurrencyInfo(diskType));
+    }
+
+    static String supportedMediaInfo() {
+        String extensions = String.join(", ", Arrays.stream(FileExtension.values())
+                .map(extension -> "." + extension.extension)
+                .toList());
+        return "Supported media types to inspect: " + extensions + ".";
     }
 
     static String missingHeartbeatInfo(Duration heartbeatSilence) {

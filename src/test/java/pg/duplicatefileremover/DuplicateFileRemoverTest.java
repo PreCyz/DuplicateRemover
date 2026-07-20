@@ -45,6 +45,18 @@ public class DuplicateFileRemoverTest {
     }
 
     @Test
+    void reportsSupportedMediaBeforeDiskAndThreadInformation() {
+        String mediaInfo = "Supported media types to inspect: "
+                + ".jpeg, .jpg, .png, .gif, .bmp, .webp, .mov, .3gp, .mp4, .m4v.";
+
+        assertThat(DuplicateFileRemover.supportedMediaInfo()).isEqualTo(mediaInfo);
+        assertThat(DuplicateFileRemover.startupInfo(DiskType.HDD)).containsExactly(
+                mediaInfo,
+                DuplicateFileRemover.scanConcurrencyInfo(DiskType.HDD)
+        );
+    }
+
+    @Test
     void defaultsToHddAndTreatsRemainingArgumentsAsRoots() {
         DuplicateFileRemover.ApplicationArguments arguments = DuplicateFileRemover.parseArguments(
                 new String[]{"first", "second"}
