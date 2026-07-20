@@ -5,7 +5,7 @@ import pg.duplicatefileremover.helpers.*;
 import java.awt.*;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Path;
+import java.nio.file.*;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.LocalTime;
@@ -13,6 +13,7 @@ import java.util.*;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.stream.Stream;
 
 public class DuplicateFileRemover {
     private static final Path REPORT_PATH = Path.of(System.getProperty(
@@ -126,7 +127,7 @@ public class DuplicateFileRemover {
             } else if (argument.startsWith("--")) {
                 throw new IllegalArgumentException("Unsupported argument: " + argument);
             } else {
-                roots.add(Path.of(argument));
+                roots.addAll(expandRootArgument(argument));
             }
             if (diskValue != null) {
                 if (diskTypeSpecified) {
@@ -140,6 +141,52 @@ public class DuplicateFileRemover {
             throw new UnsupportedOperationException("Path to folder not specified.");
         }
         return new ApplicationArguments(List.copyOf(roots), diskType);
+    }
+
+    private static List<Path> expandRootArgument(String argument) {
+        if (!containsWildcard(argument)) {
+            return List.of(Path.of(argument));
+        }
+
+        int separator = Math.max(argument.lastIndexOf('/'), argument.lastIndexOf('\\'));
+        String parentText = separator < 0 ? "." : argument.substring(0, separator + 1);
+        String directoryPattern = argument.substring(separator + 1);
+        if (directoryPattern.isEmpty() || containsWildcard(parentText)) {
+            throw new IllegalArgumentException(
+                    "Wildcards are supported only in the final directory name: " + argument
+            );
+        }
+
+        Path parent = Path.of(parentText);
+        PathMatcher matcher;
+        try {
+            matcher = FileSystems.getDefault().getPathMatcher("glob:" + directoryPattern);
+        } catch (IllegalArgumentException exception) {
+            throw new IllegalArgumentException("Invalid directory pattern: " + argument, exception);
+        }
+
+        List<Path> matches;
+        try (Stream<Path> entries = Files.list(parent)) {
+            matches = entries
+                    .filter(Files::isDirectory)
+                    .filter(path -> matcher.matches(path.getFileName()))
+                    .map(path -> path.toAbsolutePath().normalize())
+                    .sorted(Comparator.comparing(Path::toString))
+                    .toList();
+        } catch (IOException | SecurityException exception) {
+            throw new IllegalArgumentException(
+                    "Cannot inspect wildcard directory [%s]: %s".formatted(parent, exception.getMessage()),
+                    exception
+            );
+        }
+        if (matches.isEmpty()) {
+            throw new IllegalArgumentException("No directories match pattern: " + argument);
+        }
+        return matches;
+    }
+
+    private static boolean containsWildcard(String value) {
+        return value.indexOf('*') >= 0 || value.indexOf('?') >= 0;
     }
 
     private static void openBrowser(ReportServer server) {

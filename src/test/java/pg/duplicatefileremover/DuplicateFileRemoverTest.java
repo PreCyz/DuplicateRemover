@@ -1,9 +1,10 @@
 package pg.duplicatefileremover;
 
 import org.junit.jupiter.api.*;
-import pg.duplicatefileremover.helpers.FileHelper;
+import org.junit.jupiter.api.io.TempDir;
+import pg.duplicatefileremover.helpers.*;
 
-import java.nio.file.Path;
+import java.nio.file.*;
 import java.time.Duration;
 import java.time.LocalTime;
 
@@ -72,6 +73,46 @@ public class DuplicateFileRemoverTest {
                 .isEqualTo(DiskType.NVME);
         assertThat(DuplicateFileRemover.parseArguments(new String[]{"--disk", "hdd", "photos"}).diskType())
                 .isEqualTo(DiskType.HDD);
+    }
+
+    @Test
+    void expandsMatchingRootDirectoriesAndScansTheirUnrestrictedDescendants(@TempDir Path tempDir)
+            throws Exception {
+        Path firstRoot = Files.createDirectories(tempDir.resolve("2023-photos").resolve("family"));
+        Path secondRoot = Files.createDirectories(tempDir.resolve("2024-videos").resolve("any-name"));
+        Path excludedRoot = Files.createDirectories(tempDir.resolve("archive").resolve("2022"));
+        Files.writeString(firstRoot.resolve("original.jpg"), "same");
+        Files.writeString(secondRoot.resolve("duplicate.jpg"), "same");
+        Files.writeString(excludedRoot.resolve("excluded.jpg"), "same");
+
+        DuplicateFileRemover.ApplicationArguments arguments = DuplicateFileRemover.parseArguments(
+                new String[]{wildcardRoot(tempDir, "20*")}
+        );
+        ScanResult result = new FileHelper(
+                arguments.roots(),
+                new ScanProgress(),
+                arguments.diskType(),
+                null
+        ).scan();
+
+        assertThat(arguments.roots()).containsExactly(
+                tempDir.resolve("2023-photos").toAbsolutePath().normalize(),
+                tempDir.resolve("2024-videos").toAbsolutePath().normalize()
+        );
+        assertThat(result.scannedFiles()).isEqualTo(2);
+        assertThat(result.duplicateCount()).isEqualTo(1);
+    }
+
+    @Test
+    void rejectsWildcardPatternsWithoutMatchingDirectories(@TempDir Path tempDir) {
+        assertThatThrownBy(() -> DuplicateFileRemover.parseArguments(
+                new String[]{wildcardRoot(tempDir, "20*")}
+        )).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("No directories match pattern");
+    }
+
+    private static String wildcardRoot(Path parent, String pattern) {
+        return parent + FileSystems.getDefault().getSeparator() + pattern;
     }
 
     @Test

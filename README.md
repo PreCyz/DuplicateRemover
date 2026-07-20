@@ -31,6 +31,12 @@ Pass one or more directories to scan. Use `--disk=HDD` or `--disk=NVMe` to selec
 java -jar target/DuplicateFileRemover-1.0-SNAPSHOT.jar --disk=NVMe "D:\Photos" "E:\Videos"
 ```
 
+The final directory name may contain `*` or `?` wildcards. Matching directories are selected at that level and then scanned recursively without restricting descendant names. For example, this scans every direct child directory of `A:\` whose name starts with `20`:
+
+```powershell
+java -jar target/DuplicateFileRemover-1.0-SNAPSHOT.jar "A:\20*"
+```
+
 On Windows, the bundled launcher accepts the same directory arguments:
 
 ```powershell
