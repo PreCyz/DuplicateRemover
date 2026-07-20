@@ -52,7 +52,7 @@ The application:
 3. Starts a loopback-only report server and attempts to open the report in your browser.
 4. Keeps the local report server running until you close all report tabs or press Enter in the terminal.
 
-The HTML report shows both the total scan time and the duration of every completed scan step below the main summary.
+The terminal shows elapsed time for every active step. Steps with a known total also show a smoothed estimated time remaining and expected completion time after a short warm-up. Discovery shows elapsed time only because its total workload is not known until traversal finishes. The HTML report shows both the total scan time and the duration of every completed scan step below the main summary.
 
 Keep the terminal window open while using **Remove** or **Remove All Duplicates**. The browser buttons call the local server, which accepts deletion only for files verified as duplicates during this scan. Before deletion, the application verifies that the file still has the same size and SHA-256 hash. Files changed after scanning are preserved. After the last report tab closes, the server stops automatically following a short grace period; pressing Enter remains available as an immediate fallback.
 

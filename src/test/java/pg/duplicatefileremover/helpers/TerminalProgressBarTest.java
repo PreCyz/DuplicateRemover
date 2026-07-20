@@ -5,7 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
+import java.time.*;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -56,12 +56,14 @@ class TerminalProgressBarTest {
                 nanoTime::get
         )) {
             progress.begin(ScanProgress.Stage.HASHING, 2);
-            assertThat(bytes.toString(StandardCharsets.UTF_8)).contains("0 / 2 files (0s)");
+            assertThat(bytes.toString(StandardCharsets.UTF_8))
+                    .contains("0 / 2 files (0s elapsed, ETA calculating...)");
 
             nanoTime.set(Duration.ofSeconds(2).toNanos());
             progress.itemCompleted();
             progressBar.render();
-            assertThat(bytes.toString(StandardCharsets.UTF_8)).contains("1 / 2 files (2s)");
+            assertThat(bytes.toString(StandardCharsets.UTF_8))
+                    .contains("1 / 2 files (2s elapsed, ETA calculating...)");
 
             nanoTime.set(Duration.ofSeconds(2).plusMillis(541).toNanos());
             progress.itemCompleted();
@@ -69,6 +71,49 @@ class TerminalProgressBarTest {
         }
 
         assertThat(bytes.toString(StandardCharsets.UTF_8)).contains("2 / 2 files (2s 541ms)");
+    }
+
+    @Test
+    void estimatesRemainingTimeAndExpectedEndAfterWarmUp() {
+        Clock clock = Clock.fixed(Instant.parse("2026-07-20T10:00:00Z"), ZoneOffset.UTC);
+        ScanProgress.Snapshot snapshot = new ScanProgress.Snapshot(
+                ScanProgress.Stage.SAMPLING,
+                25,
+                100,
+                12,
+                345
+        );
+
+        assertThat(TerminalProgressBar.formatActiveTiming(
+                snapshot,
+                Duration.ofSeconds(4),
+                5,
+                clock
+        )).isEqualTo("4s elapsed, ETA calculating...");
+        assertThat(TerminalProgressBar.formatActiveTiming(
+                snapshot,
+                Duration.ofSeconds(10),
+                5,
+                clock
+        )).isEqualTo("10s elapsed, about 15s remaining, ends around 10:00:15");
+    }
+
+    @Test
+    void omitsEtaForDiscoveryAndCompletedStages() {
+        Clock clock = Clock.fixed(Instant.parse("2026-07-20T10:00:00Z"), ZoneOffset.UTC);
+
+        assertThat(TerminalProgressBar.formatActiveTiming(
+                new ScanProgress.Snapshot(ScanProgress.Stage.DISCOVERING, 0, 0, 12, 345),
+                Duration.ofSeconds(10),
+                0,
+                clock
+        )).isEqualTo("10s elapsed");
+        assertThat(TerminalProgressBar.formatActiveTiming(
+                new ScanProgress.Snapshot(ScanProgress.Stage.HASHING, 100, 100, 12, 345),
+                Duration.ofSeconds(10),
+                5,
+                clock
+        )).isEqualTo("10s elapsed");
     }
 
     @Test

@@ -1,7 +1,9 @@
 package pg.duplicatefileremover.helpers;
 
 import java.io.PrintStream;
+import java.time.Clock;
 import java.time.Duration;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
@@ -10,6 +12,9 @@ import java.util.function.LongSupplier;
 
 public final class TerminalProgressBar implements AutoCloseable {
     private static final int BAR_WIDTH = 24;
+    private static final Duration ETA_WARM_UP = Duration.ofSeconds(5);
+    private static final long RATE_SAMPLE_INTERVAL_NANOS = Duration.ofMillis(500).toNanos();
+    private static final double RATE_SMOOTHING_FACTOR = 0.3;
     private static final char[] SPINNER = {'|', '/', '-', '\\'};
 
     private final ScanProgress progress;
@@ -18,11 +23,16 @@ public final class TerminalProgressBar implements AutoCloseable {
     private final ScheduledExecutorService renderer;
     private final AtomicReference<ScanProgress.Snapshot> latestSnapshot;
     private final LongSupplier nanoTime;
+    private final Clock clock;
     private final Consumer<ScanProgress.Snapshot> progressListener = this::observeProgress;
     private ScanProgress.Stage lastPrintedStage;
     private long stageStartedNanos;
     private int frame;
     private int previousLength;
+    private ScanProgress.Stage rateStage = ScanProgress.Stage.NOT_STARTED;
+    private long rateSampleNanos;
+    private long rateSampleCompleted;
+    private double smoothedRate;
 
     public TerminalProgressBar(ScanProgress progress) {
         this(progress, System.out, System.console() != null);
@@ -38,12 +48,24 @@ public final class TerminalProgressBar implements AutoCloseable {
             boolean interactive,
             LongSupplier nanoTime
     ) {
+        this(progress, output, interactive, nanoTime, Clock.systemDefaultZone());
+    }
+
+    TerminalProgressBar(
+            ScanProgress progress,
+            PrintStream output,
+            boolean interactive,
+            LongSupplier nanoTime,
+            Clock clock
+    ) {
         this.progress = Objects.requireNonNull(progress, "progress");
         this.output = Objects.requireNonNull(output, "output");
         this.interactive = interactive;
         this.nanoTime = Objects.requireNonNull(nanoTime, "nanoTime");
+        this.clock = Objects.requireNonNull(clock, "clock");
         latestSnapshot = new AtomicReference<>(progress.snapshot());
         stageStartedNanos = nanoTime.getAsLong();
+        resetRate(progress.snapshot(), stageStartedNanos);
         renderer = Executors.newSingleThreadScheduledExecutor(
                 Thread.ofPlatform().daemon().name("scan-progress-renderer").factory()
         );
@@ -106,12 +128,52 @@ public final class TerminalProgressBar implements AutoCloseable {
         return "%s (%s)".formatted(format(snapshot, frame), formatDuration(elapsed));
     }
 
-    private static String formatActive(
+    private String formatActive(
             ScanProgress.Snapshot snapshot,
             int frame,
             Duration elapsed
     ) {
-        return "%s (%s)".formatted(format(snapshot, frame), formatActiveDuration(elapsed));
+        return "%s (%s)".formatted(
+                format(snapshot, frame),
+                formatActiveTiming(snapshot, elapsed, smoothedRate, clock)
+        );
+    }
+
+    static String formatActiveTiming(
+            ScanProgress.Snapshot snapshot,
+            Duration elapsed,
+            double recentRate,
+            Clock clock
+    ) {
+        String elapsedText = formatActiveDuration(elapsed) + " elapsed";
+        if (snapshot.stage() == ScanProgress.Stage.DISCOVERING
+                || snapshot.total() <= 0
+                || snapshot.completed() >= snapshot.total()) {
+            return elapsedText;
+        }
+        if (elapsed.compareTo(ETA_WARM_UP) < 0 || snapshot.completed() <= 0) {
+            return elapsedText + ", ETA calculating...";
+        }
+
+        double rate = recentRate > 0
+                ? recentRate
+                : snapshot.completed() / Math.max(elapsed.toNanos() / 1_000_000_000.0, 0.001);
+        if (!Double.isFinite(rate) || rate <= 0) {
+            return elapsedText + ", ETA calculating...";
+        }
+        long remainingSeconds = Math.max(
+                1,
+                (long) Math.ceil((snapshot.total() - snapshot.completed()) / rate)
+        );
+        Duration remaining = Duration.ofSeconds(remainingSeconds);
+        DateTimeFormatter finishTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss", Locale.ROOT)
+                .withZone(clock.getZone());
+        String finishTime = finishTimeFormatter.format(clock.instant().plus(remaining));
+        return "%s, about %s remaining, ends around %s".formatted(
+                elapsedText,
+                formatActiveDuration(remaining),
+                finishTime
+        );
     }
 
     static String formatActiveDuration(Duration duration) {
@@ -227,23 +289,51 @@ public final class TerminalProgressBar implements AutoCloseable {
 
     private void observeProgress(ScanProgress.Snapshot snapshot) {
         ScanProgress.Snapshot previous = latestSnapshot.getAndSet(snapshot);
-        if (previous != null && previous.stage() != snapshot.stage()) {
-            synchronized (this) {
-                long transitionNanos = nanoTime.getAsLong();
+        synchronized (this) {
+            long observationNanos = nanoTime.getAsLong();
+            if (previous != null && previous.stage() != snapshot.stage()) {
                 if (isWorkStage(previous.stage())) {
                     renderCompletedSnapshot(
                             previous,
-                            Duration.ofNanos(Math.max(0, transitionNanos - stageStartedNanos))
+                            Duration.ofNanos(Math.max(0, observationNanos - stageStartedNanos))
                     );
                 }
-                stageStartedNanos = transitionNanos;
+                stageStartedNanos = observationNanos;
+                resetRate(snapshot, observationNanos);
                 if (interactive
                         || snapshot.stage() == ScanProgress.Stage.COMPLETE
                         || snapshot.stage() == ScanProgress.Stage.FAILED) {
                     renderSnapshot(snapshot);
                 }
+            } else {
+                updateRate(snapshot, observationNanos);
             }
         }
+    }
+
+    private void resetRate(ScanProgress.Snapshot snapshot, long observationNanos) {
+        rateStage = snapshot.stage();
+        rateSampleNanos = observationNanos;
+        rateSampleCompleted = snapshot.completed();
+        smoothedRate = 0;
+    }
+
+    private void updateRate(ScanProgress.Snapshot snapshot, long observationNanos) {
+        if (snapshot.stage() != rateStage || snapshot.completed() < rateSampleCompleted) {
+            resetRate(snapshot, observationNanos);
+            return;
+        }
+        long elapsedNanos = observationNanos - rateSampleNanos;
+        long completedSinceSample = snapshot.completed() - rateSampleCompleted;
+        if (completedSinceSample <= 0 || elapsedNanos < RATE_SAMPLE_INTERVAL_NANOS) {
+            return;
+        }
+        double currentRate = completedSinceSample / (elapsedNanos / 1_000_000_000.0);
+        smoothedRate = smoothedRate == 0
+                ? currentRate
+                : RATE_SMOOTHING_FACTOR * currentRate + (1 - RATE_SMOOTHING_FACTOR) * smoothedRate;
+        rateSampleNanos = observationNanos;
+        rateSampleCompleted = snapshot.completed();
     }
 
     private void renderCompletedSnapshot(ScanProgress.Snapshot snapshot, Duration elapsed) {
