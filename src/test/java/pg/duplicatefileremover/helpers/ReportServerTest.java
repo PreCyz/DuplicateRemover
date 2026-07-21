@@ -300,8 +300,10 @@ class ReportServerTest {
             );
 
             assertThat(response.statusCode()).isEqualTo(200);
+            assertThat(response.headers().firstValue("Content-Type").orElseThrow())
+                    .startsWith("application/x-ndjson");
             assertThat(response.body()).contains("first-copy.jpg", "second-copy.jpg")
-                    .contains("\"failedPaths\":[]");
+                    .contains("\"deleted\":true");
             assertThat(original).exists();
             assertThat(firstDuplicate).doesNotExist();
             assertThat(secondDuplicate).doesNotExist();
@@ -518,6 +520,57 @@ class ReportServerTest {
             assertThat(deleteResponse.get(2, TimeUnit.SECONDS).statusCode()).isEqualTo(204);
             assertThat(duplicate).doesNotExist();
             browserExit.get(2, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void bulkDeletionFinishesAfterBrowserSessionCloses(@TempDir Path tempDir) throws Exception {
+        Path original = Files.writeString(tempDir.resolve("origin.jpg"), "same-content");
+        Path firstDuplicate = Files.writeString(tempDir.resolve("first-copy.jpg"), "same-content");
+        Path secondDuplicate = Files.writeString(tempDir.resolve("second-copy.jpg"), "same-content");
+        String hash = FileHelper.getSHAHashForFile(original);
+        ScanResult result = new ScanResult(
+                3,
+                List.of(new DuplicateGroup(hash, Files.size(original), original, List.of(firstDuplicate, secondDuplicate))),
+                Duration.ZERO
+        );
+        Path report = Files.writeString(tempDir.resolve("report.html"), "<html>report</html>");
+        CountDownLatch deletionStarted = new CountDownLatch(1);
+        CountDownLatch allowDeletion = new CountDownLatch(1);
+
+        try (ReportServer server = new ReportServer(result, report, DiskType.NVME, Duration.ofMillis(100), ignored -> {
+            deletionStarted.countDown();
+            try {
+                allowDeletion.await();
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+            }
+        }); HttpClient client = HttpClient.newHttpClient()) {
+            server.start();
+            String sessionId = "bulk-job-session";
+            assertThat(postSession(client, server, "heartbeat", sessionId).statusCode()).isEqualTo(204);
+            URI deleteUri = URI.create(server.apiBase() + "/api/duplicates?token=" + server.apiToken());
+            CompletableFuture<HttpResponse<String>> response = client.sendAsync(
+                    HttpRequest.newBuilder(deleteUri)
+                            .header("X-Report-Session", sessionId)
+                            .DELETE()
+                            .build(),
+                    HttpResponse.BodyHandlers.ofString()
+            );
+
+            try {
+                assertThat(deletionStarted.await(2, TimeUnit.SECONDS)).isTrue();
+                assertThat(postSession(client, server, "close", sessionId).statusCode()).isEqualTo(204);
+                Thread.sleep(300);
+                assertThat(server.browserSessionsEnded().toCompletableFuture()).isNotDone();
+            } finally {
+                allowDeletion.countDown();
+            }
+
+            assertThat(response.get(2, TimeUnit.SECONDS).statusCode()).isEqualTo(200);
+            assertThat(firstDuplicate).doesNotExist();
+            assertThat(secondDuplicate).doesNotExist();
+            server.browserSessionsEnded().toCompletableFuture().get(2, TimeUnit.SECONDS);
         }
     }
 

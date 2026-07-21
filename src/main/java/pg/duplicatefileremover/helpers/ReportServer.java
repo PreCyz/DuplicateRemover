@@ -439,23 +439,65 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
 
     private void removeAllDuplicates(HttpExchange exchange) throws IOException {
         List<Path> duplicatePathsToDelete = List.copyOf(duplicatePaths);
-        List<String> deleted = new ArrayList<>();
-        List<String> failed = new ArrayList<>();
-        Map<Path, Future<DeleteStatus>> deletions = new LinkedHashMap<>();
+        CompletionService<DeletionResult> deletions = new ExecutorCompletionService<>(deletionExecutor);
         for (Path duplicatePath : duplicatePathsToDelete) {
-            deletions.put(duplicatePath, deletionExecutor.submit(() -> deleteDuplicateNow(duplicatePath)));
+            deletions.submit(() -> new DeletionResult(duplicatePath, deleteDuplicateNow(duplicatePath)));
         }
-        for (Map.Entry<Path, Future<DeleteStatus>> deletion : deletions.entrySet()) {
-            if (awaitDeletion(deletion.getValue()) == DeleteStatus.DELETED) {
-                deleted.add(deletion.getKey().toString());
-            } else {
-                failed.add(deletion.getKey().toString());
-                deletionFailureReasons.remove(deletion.getKey());
+
+        addCommonHeaders(exchange);
+        exchange.getResponseHeaders().set("Content-Type", "application/x-ndjson; charset=utf-8");
+        exchange.sendResponseHeaders(200, 0);
+        boolean responseConnected = true;
+        try (OutputStream output = exchange.getResponseBody()) {
+            for (int completed = 0; completed < duplicatePathsToDelete.size(); completed++) {
+                DeletionResult result = awaitDeletionResult(deletions);
+                String line = deletionResultJson(result) + "\n";
+                if (responseConnected) {
+                    try {
+                        output.write(line.getBytes(StandardCharsets.UTF_8));
+                        output.flush();
+                    } catch (IOException ignored) {
+                        // The browser may close, but this server-owned job must still finish deleting its snapshot.
+                        responseConnected = false;
+                    }
+                }
             }
+        } catch (IOException ignored) {
+            // A disconnected browser must not cancel an already accepted bulk deletion.
         }
-        String json = "{\"deletedPaths\":" + jsonArray(deleted)
-                + ",\"failedPaths\":" + jsonArray(failed) + "}";
-        send(exchange, 200, json, "application/json; charset=utf-8");
+    }
+
+    private DeletionResult awaitDeletionResult(CompletionService<DeletionResult> deletions) throws IOException {
+        try {
+            return deletions.take().get();
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while removing duplicates", exception);
+        } catch (ExecutionException exception) {
+            throw new IOException("Concurrent duplicate removal failed", exception.getCause());
+        }
+    }
+
+    private String deletionResultJson(DeletionResult result) {
+        String path = result.path().toString();
+        if (result.status() == DeleteStatus.DELETED) {
+            return "{\"path\":" + jsonString(path) + ",\"deleted\":true}";
+        }
+        String reason = deletionFailureReasons.remove(result.path());
+        String message = reason == null ? deletionStatusMessage(result.status()) : reason;
+        return "{\"path\":" + jsonString(path)
+                + ",\"deleted\":false,\"message\":" + jsonString(message) + "}";
+    }
+
+    private static String deletionStatusMessage(DeleteStatus status) {
+        return switch (status) {
+            case NOT_FOUND -> "Duplicate file no longer exists";
+            case NOT_REGISTERED -> "Path is not a registered duplicate";
+            case NOT_FILE -> "Duplicate path no longer identifies a regular file";
+            case DELETE_FAILED -> "File could not be removed; it may be open or protected";
+            case IN_PROGRESS -> "Duplicate is already being removed";
+            case DELETED -> throw new IllegalArgumentException("A successful deletion has no failure message");
+        };
     }
 
     private DeleteStatus deleteDuplicate(Path path) throws IOException {
@@ -768,12 +810,6 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
         exchange.getResponseHeaders().set("Referrer-Policy", "no-referrer");
     }
 
-    private String jsonArray(List<String> values) {
-        return values.stream()
-                .map(ReportServer::jsonString)
-                .collect(java.util.stream.Collectors.joining(",", "[", "]"));
-    }
-
     private static String jsonString(String value) {
         StringBuilder escaped = new StringBuilder(value.length() + 2).append('"');
         for (int index = 0; index < value.length(); index++) {
@@ -802,6 +838,8 @@ public final class ReportServer implements AutoCloseable, ReportHelper.ReportLin
     interface FileDeletion {
         void delete(Path path) throws IOException;
     }
+
+    private record DeletionResult(Path path, DeleteStatus status) { }
 
     private enum DeleteStatus {
         DELETED,

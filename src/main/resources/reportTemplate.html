@@ -143,8 +143,7 @@
             remainingDuplicateBytes += Number(card.dataset.bytes);
         });
         let remainingDuplicateCount = duplicateCardsByPath.size;
-        const bulkDeletionStartUrl = `${apiBase}/api/session/deletion/start?token=${encodeURIComponent(apiToken)}`;
-        const bulkDeletionFinishUrl = `${apiBase}/api/session/deletion/finish?token=${encodeURIComponent(apiToken)}`;
+        const bulkDeletionUrl = `${apiBase}/api/duplicates?token=${encodeURIComponent(apiToken)}`;
         const deletionRequestOptions = path => ({
             method: 'DELETE',
             headers: {
@@ -153,11 +152,10 @@
             },
             body: path
         });
-        const postSessionActivity = url => fetch(url, {
-            method: 'POST',
-            body: sessionId,
-            keepalive: true
-        });
+        const bulkDeletionRequestOptions = {
+            method: 'DELETE',
+            headers: {'X-Report-Session': sessionId}
+        };
 
         const formatBytes = bytes => {
             if (bytes < 1024) return `${bytes} B`;
@@ -321,50 +319,54 @@
             progressBar.classList.add('progress-bar-animated');
             updateProgress(0, total);
 
-            let bulkDeletionLeaseStarted = false;
+            let deleted = 0;
+            let failed = 0;
+            const applyDeletionResult = async result => {
+                const card = duplicateCardsByPath.get(result.path);
+                if (result.deleted) {
+                    if (removeCard(result.path)) deleted++;
+                } else {
+                    failed++;
+                    const button = card?.querySelector('.remove-duplicate');
+                    if (button) button.disabled = false;
+                }
+                updateProgress(deleted + failed, total);
+                await allowBrowserPaint();
+            };
+
             try {
-                const leaseResponse = await postSessionActivity(bulkDeletionStartUrl);
-                if (!leaseResponse.ok) throw new Error(await leaseResponse.text());
-                bulkDeletionLeaseStarted = true;
+                const response = await fetch(bulkDeletionUrl, bulkDeletionRequestOptions);
+                if (!response.ok) throw new Error(await response.text());
+                if (!response.body) {
+                    for (const line of (await response.text()).split('\n')) {
+                        if (line.trim()) await applyDeletionResult(JSON.parse(line));
+                    }
+                } else {
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buffered = '';
+                    while (true) {
+                        const {value, done} = await reader.read();
+                        buffered += decoder.decode(value || new Uint8Array(), {stream: !done});
+                        const lines = buffered.split('\n');
+                        buffered = lines.pop();
+                        for (const line of lines) {
+                            if (line.trim()) await applyDeletionResult(JSON.parse(line));
+                        }
+                        if (done) break;
+                    }
+                    if (buffered.trim()) await applyDeletionResult(JSON.parse(buffered));
+                }
+                await waitForCardRemovals();
             } catch (error) {
                 removeAllButton.disabled = false;
                 cards.forEach(card => {
                     const button = card.querySelector('.remove-duplicate');
-                    if (button) button.disabled = false;
+                    if (button && duplicateCardsByPath.has(card.dataset.duplicatePath)) button.disabled = false;
                 });
-                progressSection.classList.add('d-none');
-                showStatus(error.message || 'Bulk deletion could not be started.', 'danger');
+                progressBar.classList.remove('progress-bar-animated');
+                showStatus(error.message || 'Bulk deletion was interrupted.', 'danger');
                 return;
-            }
-
-            let deleted = 0;
-            let failed = 0;
-            let nextCardIndex = 0;
-            const removeNext = async () => {
-                while (nextCardIndex < total) {
-                    const card = cards[nextCardIndex++];
-                    const path = card.dataset.duplicatePath;
-                    try {
-                        const response = await fetch(`${apiBase}/api/duplicates/path?token=${encodeURIComponent(apiToken)}`, deletionRequestOptions(path));
-                        if (!response.ok) throw new Error(await response.text());
-                        if (removeCard(path)) deleted++;
-                    } catch (error) {
-                        failed++;
-                        const button = card.querySelector('.remove-duplicate');
-                        if (button) button.disabled = false;
-                    }
-                    updateProgress(deleted + failed, total);
-                    await allowBrowserPaint();
-                }
-            };
-            const activeWorkers = Math.min(deletionWorkerCount, total);
-            try {
-                await Promise.all(Array.from({length: activeWorkers}, () => removeNext()));
-                await waitForCardRemovals();
-            } finally {
-                if (bulkDeletionLeaseStarted) {
-                    await postSessionActivity(bulkDeletionFinishUrl).catch(() => {});
-                }
             }
 
             progressBar.classList.remove('progress-bar-animated');
