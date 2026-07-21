@@ -8,10 +8,14 @@ import pg.duplicatefileremover.TestBase;
 import java.io.*;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributeView;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.time.Duration;
+import java.util.Base64;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Properties;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -284,12 +288,9 @@ class FileHelperTest extends TestBase {
                 cache
         ).scan();
 
-        Properties cachedHashes = new Properties();
-        try (InputStream input = Files.newInputStream(cache)) {
-            cachedHashes.load(input);
-        }
-        assertThat(cachedHashes).containsKey(original.toAbsolutePath().normalize().toString());
-        assertThat(cachedHashes).doesNotContainKey(duplicate.toAbsolutePath().normalize().toString());
+        Set<String> cachedPaths = readCachedPaths(cache);
+        assertThat(cachedPaths).contains(original.toAbsolutePath().normalize().toString());
+        assertThat(cachedPaths).doesNotContain(duplicate.toAbsolutePath().normalize().toString());
         assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.VALIDATING_HASH_CACHE)
                 .extracting(ScanProgress.Snapshot::completed)
                 .endsWith(2L);
@@ -315,16 +316,11 @@ class FileHelperTest extends TestBase {
 
         new FileHelper(List.of(firstRoot), new ScanProgress(), DiskType.HDD, cache).scan();
 
-        Properties cachedHashes = new Properties();
-        try (InputStream input = Files.newInputStream(cache)) {
-            cachedHashes.load(input);
-        }
-        assertThat(cachedHashes).containsKeys(
+        assertThat(readCachedPaths(cache)).contains(
                 firstOriginal.toAbsolutePath().normalize().toString(),
                 secondOriginal.toAbsolutePath().normalize().toString(),
                 secondDuplicate.toAbsolutePath().normalize().toString()
-        );
-        assertThat(cachedHashes).doesNotContainKey(firstDuplicate.toAbsolutePath().normalize().toString());
+        ).doesNotContain(firstDuplicate.toAbsolutePath().normalize().toString());
     }
 
     @Test
@@ -339,6 +335,85 @@ class FileHelperTest extends TestBase {
         new FileHelper(List.of(tempDir), new ScanProgress(), DiskType.HDD, cache).scan();
 
         assertThat(Files.getLastModifiedTime(cache)).isEqualTo(preservedTimestamp);
+    }
+
+    @Test
+    void storesVersionedSnapshotAndReplaysIncrementalJournal(@TempDir Path tempDir) throws Exception {
+        Path original = Files.writeString(tempDir.resolve("original.jpg"), "same");
+        Path duplicate = Files.writeString(tempDir.resolve("duplicate.jpg"), "same");
+        Path cache = tempDir.resolve("hashes.properties");
+        new FileHelper(List.of(tempDir), new ScanProgress(), DiskType.HDD, cache).scan();
+
+        assertThat(Files.readString(cache)).startsWith("# duplicate-file-remover-hash-cache-v2");
+        Files.writeString(duplicate, "diff");
+        Files.setLastModifiedTime(duplicate, FileTime.fromMillis(System.currentTimeMillis() + 2_000));
+        new FileHelper(List.of(tempDir), new ScanProgress(), DiskType.HDD, cache).scan();
+
+        Path journal = cache.resolveSibling(cache.getFileName() + ".journal");
+        assertThat(journal).exists();
+        assertThat(Files.readString(journal)).startsWith("# duplicate-file-remover-hash-cache-journal-v2");
+        ScanResult journalBackedScan = new FileHelper(
+                List.of(tempDir),
+                new ScanProgress(),
+                DiskType.HDD,
+                cache
+        ).scan();
+        assertThat(journalBackedScan.duplicateGroups()).isEmpty();
+        assertThat(readCachedPaths(cache)).containsExactlyInAnyOrder(
+                original.toAbsolutePath().normalize().toString(),
+                duplicate.toAbsolutePath().normalize().toString()
+        );
+    }
+
+    @Test
+    void migratesLegacyPropertiesCacheToVersionedSnapshot(@TempDir Path tempDir) throws Exception {
+        Path original = Files.writeString(tempDir.resolve("original.jpg"), "same");
+        Path duplicate = Files.writeString(tempDir.resolve("duplicate.jpg"), "same");
+        Path cache = tempDir.resolve("hashes.properties");
+        String hash = FileHelper.getSHAHashForFile(original);
+        Properties legacy = new Properties();
+        for (Path file : List.of(original, duplicate)) {
+            BasicFileAttributes attributes = Files.readAttributes(file, BasicFileAttributes.class);
+            legacy.setProperty(
+                    file.toAbsolutePath().normalize().toString(),
+                    "%d,%d,%d,%s".formatted(
+                            attributes.size(),
+                            attributes.creationTime().toMillis(),
+                            attributes.lastModifiedTime().toMillis(),
+                            hash
+                    )
+            );
+        }
+        try (OutputStream output = Files.newOutputStream(cache)) {
+            legacy.store(output, "Legacy cache");
+        }
+
+        ScanResult result = new FileHelper(List.of(tempDir), new ScanProgress(), DiskType.HDD, cache).scan();
+
+        assertThat(result.duplicateCount()).isEqualTo(1);
+        assertThat(Files.readString(cache)).startsWith("# duplicate-file-remover-hash-cache-v2");
+    }
+
+    @Test
+    void removesVersionedCacheEntriesNotSeenForOneHundredEightyDays(@TempDir Path tempDir) throws Exception {
+        Path scanRoot = Files.createDirectory(tempDir.resolve("current"));
+        Files.writeString(scanRoot.resolve("current.jpg"), "current");
+        Path stalePath = tempDir.resolve("outside-current-scan.jpg").toAbsolutePath().normalize();
+        Path cache = tempDir.resolve("hashes.properties");
+        String staleRecord = "%s\t1\t1\t1\t0\t%s".formatted(
+                Base64.getUrlEncoder().withoutPadding().encodeToString(
+                        stalePath.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8)
+                ),
+                "0".repeat(64)
+        );
+        Files.writeString(
+                cache,
+                "# duplicate-file-remover-hash-cache-v2%n%s%n".formatted(staleRecord)
+        );
+
+        new FileHelper(List.of(scanRoot), new ScanProgress(), DiskType.HDD, cache).scan();
+
+        assertThat(readCachedPaths(cache)).doesNotContain(stalePath.toString());
     }
 
     @Test
@@ -444,5 +519,31 @@ class FileHelperTest extends TestBase {
         assertThat(result.stageDurations().values()).allSatisfy(duration ->
                 assertThat(duration).isGreaterThanOrEqualTo(Duration.ZERO)
         );
+    }
+
+    private static Set<String> readCachedPaths(Path cache) throws IOException {
+        Set<String> paths = new HashSet<>();
+        for (String line : Files.readAllLines(cache)) {
+            if (line.isBlank() || line.startsWith("#")) {
+                continue;
+            }
+            paths.add(decodeCachePath(line.substring(0, line.indexOf('\t'))));
+        }
+        Path journal = cache.resolveSibling(cache.getFileName() + ".journal");
+        if (Files.isRegularFile(journal)) {
+            for (String line : Files.readAllLines(journal)) {
+                if (line.startsWith("D\t")) {
+                    paths.remove(decodeCachePath(line.substring(2)));
+                } else if (line.startsWith("P\t")) {
+                    String record = line.substring(2);
+                    paths.add(decodeCachePath(record.substring(0, record.indexOf('\t'))));
+                }
+            }
+        }
+        return paths;
+    }
+
+    private static String decodeCachePath(String encoded) {
+        return new String(Base64.getUrlDecoder().decode(encoded), java.nio.charset.StandardCharsets.UTF_8);
     }
 }
