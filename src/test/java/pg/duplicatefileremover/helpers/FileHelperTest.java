@@ -296,6 +296,52 @@ class FileHelperTest extends TestBase {
     }
 
     @Test
+    void preservesCacheEntriesOutsideTheCurrentScanRoots(@TempDir Path tempDir) throws Exception {
+        Path firstRoot = Files.createDirectory(tempDir.resolve("first"));
+        Path secondRoot = Files.createDirectory(tempDir.resolve("second"));
+        Path firstOriginal = Files.writeString(firstRoot.resolve("first-original.jpg"), "first");
+        Path firstDuplicate = Files.writeString(firstRoot.resolve("first-duplicate.jpg"), "first");
+        Path secondOriginal = Files.writeString(secondRoot.resolve("second-original.jpg"), "second");
+        Path secondDuplicate = Files.writeString(secondRoot.resolve("second-duplicate.jpg"), "second");
+        Path cache = tempDir.resolve("hashes.properties");
+
+        new FileHelper(
+                List.of(firstRoot, secondRoot),
+                new ScanProgress(),
+                DiskType.HDD,
+                cache
+        ).scan();
+        Files.delete(firstDuplicate);
+
+        new FileHelper(List.of(firstRoot), new ScanProgress(), DiskType.HDD, cache).scan();
+
+        Properties cachedHashes = new Properties();
+        try (InputStream input = Files.newInputStream(cache)) {
+            cachedHashes.load(input);
+        }
+        assertThat(cachedHashes).containsKeys(
+                firstOriginal.toAbsolutePath().normalize().toString(),
+                secondOriginal.toAbsolutePath().normalize().toString(),
+                secondDuplicate.toAbsolutePath().normalize().toString()
+        );
+        assertThat(cachedHashes).doesNotContainKey(firstDuplicate.toAbsolutePath().normalize().toString());
+    }
+
+    @Test
+    void doesNotRewriteUnchangedHashCache(@TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("original.jpg"), "same");
+        Files.writeString(tempDir.resolve("duplicate.jpg"), "same");
+        Path cache = tempDir.resolve("hashes.properties");
+        new FileHelper(List.of(tempDir), new ScanProgress(), DiskType.HDD, cache).scan();
+        FileTime preservedTimestamp = FileTime.fromMillis(1_000);
+        Files.setLastModifiedTime(cache, preservedTimestamp);
+
+        new FileHelper(List.of(tempDir), new ScanProgress(), DiskType.HDD, cache).scan();
+
+        assertThat(Files.getLastModifiedTime(cache)).isEqualTo(preservedTimestamp);
+    }
+
+    @Test
     void scanRejectsNonDirectory(@TempDir Path tempDir) throws IOException {
         Path file = Files.writeString(tempDir.resolve("image.jpg"), "content");
         ScanProgress progress = new ScanProgress();

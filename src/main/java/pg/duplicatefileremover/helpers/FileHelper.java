@@ -260,7 +260,7 @@ public class FileHelper {
                 hashCache.size()
         );
         progress.begin(ScanProgress.Stage.VALIDATING_HASH_CACHE, cacheValidationWork);
-        hashCache.removeMissingEntries(progress);
+        hashCache.reconcileWithScan(filesBySize.values(), roots, progress);
 
         List<FileMetadata> candidateList = new ArrayList<>();
         ConcurrentLinkedQueue<CachedCandidate> cachedCandidates = new ConcurrentLinkedQueue<>();
@@ -281,28 +281,23 @@ public class FileHelper {
             }
         }
 
-        ConcurrentLinkedQueue<Exception> cacheFailures = new ConcurrentLinkedQueue<>();
         List<Future<?>> cacheWorkers = startWorkers(executor, scanProfile.samplingWorkers(), () -> {
             CachedCandidate cachedCandidate;
-            while (cacheFailures.isEmpty() && (cachedCandidate = cachedCandidates.poll()) != null) {
+            while ((cachedCandidate = cachedCandidates.poll()) != null) {
                 try {
                     FileMetadata candidate = cachedCandidate.file();
-                    ensureMetadataUnchanged(candidate);
                     filesByHash
                             .computeIfAbsent(
                                     new HashKey(candidate.size(), cachedCandidate.hash()),
                                     ignored -> new ConcurrentLinkedQueue<>()
                             )
                             .add(candidate);
-                } catch (IOException exception) {
-                    cacheFailures.add(exception);
                 } finally {
                     progress.itemCompleted();
                 }
             }
         });
         awaitWorkers(cacheWorkers);
-        throwHashingFailure(cacheFailures.peek());
 
         candidateList = orderForIo(candidateList);
         ConcurrentLinkedQueue<FileMetadata> candidates = new ConcurrentLinkedQueue<>(candidateList);
@@ -623,6 +618,7 @@ public class FileHelper {
     private static final class HashCache {
         private final Path path;
         private final ConcurrentMap<String, CachedHash> entries = new ConcurrentHashMap<>();
+        private final AtomicBoolean dirty = new AtomicBoolean();
 
         private HashCache(Path path) {
             this.path = path == null ? null : path.toAbsolutePath().normalize();
@@ -667,14 +663,28 @@ public class FileHelper {
             return entries.size();
         }
 
-        private void removeMissingEntries(ScanProgress progress) {
-            for (String filePath : List.copyOf(entries.keySet())) {
+        private void reconcileWithScan(
+                Collection<List<FileMetadata>> filesBySize,
+                List<Path> scanRoots,
+                ScanProgress progress
+        ) {
+            Set<String> discoveredPaths = filesBySize.stream()
+                    .flatMap(Collection::stream)
+                    .map(metadata -> metadata.path().toString())
+                    .collect(Collectors.toUnmodifiableSet());
+            for (String filePath : entries.keySet()) {
                 try {
-                    if (!Files.isRegularFile(Path.of(filePath), LinkOption.NOFOLLOW_LINKS)) {
-                        entries.remove(filePath);
+                    Path cachedPath = Path.of(filePath).toAbsolutePath().normalize();
+                    boolean belongsToCurrentScan = scanRoots.stream().anyMatch(cachedPath::startsWith);
+                    if (belongsToCurrentScan
+                            && !discoveredPaths.contains(cachedPath.toString())
+                            && entries.remove(filePath) != null) {
+                        dirty.set(true);
                     }
                 } catch (InvalidPathException exception) {
-                    entries.remove(filePath);
+                    if (entries.remove(filePath) != null) {
+                        dirty.set(true);
+                    }
                 } finally {
                     progress.itemCompleted();
                 }
@@ -682,16 +692,20 @@ public class FileHelper {
         }
 
         private void put(FileMetadata metadata, String hash) {
-            entries.put(metadata.path().toString(), new CachedHash(
+            CachedHash replacement = new CachedHash(
                     metadata.size(),
                     metadata.creationTime().toMillis(),
                     metadata.lastModifiedTime().toMillis(),
                     hash
-            ));
+            );
+            CachedHash previous = entries.put(metadata.path().toString(), replacement);
+            if (!replacement.equals(previous)) {
+                dirty.set(true);
+            }
         }
 
         private void save(ScanProgress progress) {
-            if (path == null) {
+            if (path == null || !dirty.get()) {
                 return;
             }
             Path temporary = null;
@@ -718,6 +732,7 @@ public class FileHelper {
                     Files.move(temporary, path, StandardCopyOption.REPLACE_EXISTING);
                 }
                 temporary = null;
+                dirty.set(false);
             } catch (IOException exception) {
                 progress.warning("Could not update hash cache [%s]: %s".formatted(path, exception.getMessage()));
             } finally {
