@@ -14,6 +14,11 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 /** @author premik */
 public class DuplicateFileRemoverTest {
+
+    @Test
+    void returnsNonZeroExitCodeWhenStartupFails() {
+        assertThat(DuplicateFileRemover.run(new String[0])).isEqualTo(1);
+    }
     private DuplicateFileRemover dfr;
 
     @BeforeEach

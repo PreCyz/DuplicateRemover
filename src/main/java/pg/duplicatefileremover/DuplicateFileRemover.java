@@ -36,6 +36,13 @@ public class DuplicateFileRemover {
     }
 
     public static void main(String[] args) {
+        int exitCode = run(args);
+        if (exitCode != 0) {
+            System.exit(exitCode);
+        }
+    }
+
+    static int run(String[] args) {
         try {
             ApplicationArguments arguments = parseArguments(args);
             startupInfo(arguments.diskType(), arguments.showThumbnail()).forEach(IO::println);
@@ -70,8 +77,10 @@ public class DuplicateFileRemover {
                 openBrowser(server);
                 waitForExit(server);
             }
+            return 0;
         } catch (IllegalArgumentException | UnsupportedOperationException | IOException | NoSuchAlgorithmException exception) {
             System.err.println("Duplicate scan failed: " + exception.getMessage());
+            return 1;
         }
     }
 

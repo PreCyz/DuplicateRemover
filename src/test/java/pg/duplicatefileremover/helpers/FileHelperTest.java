@@ -11,6 +11,7 @@ import java.nio.file.attribute.BasicFileAttributeView;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashSet;
 import java.util.List;
@@ -363,6 +364,52 @@ class FileHelperTest extends TestBase {
                 original.toAbsolutePath().normalize().toString(),
                 duplicate.toAbsolutePath().normalize().toString()
         );
+    }
+
+    @Test
+    void recoversSnapshotWhenJournalEndsWithPartialRecord(@TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("original.jpg"), "same");
+        Files.writeString(tempDir.resolve("duplicate.jpg"), "same");
+        Path cache = tempDir.resolve("hashes.properties");
+        new FileHelper(List.of(tempDir), new ScanProgress(), DiskType.HDD, cache).scan();
+        Path journal = cache.resolveSibling(cache.getFileName() + ".journal");
+        Files.writeString(
+                journal,
+                "# duplicate-file-remover-hash-cache-journal-v2%nP\tincomplete".formatted()
+        );
+        List<ScanProgress.Snapshot> updates = new CopyOnWriteArrayList<>();
+
+        ScanResult result = new FileHelper(
+                List.of(tempDir),
+                new ScanProgress(updates::add),
+                DiskType.HDD,
+                cache
+        ).scan();
+
+        assertThat(result.duplicateCount()).isEqualTo(1);
+        assertThat(updates).filteredOn(update -> update.stage() == ScanProgress.Stage.HASHING)
+                .allSatisfy(update -> assertThat(update.total()).isZero());
+        assertThat(journal).doesNotExist();
+    }
+
+    @Test
+    void rejectsUnsupportedJournalVersionAndRebuildsCache(@TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("original.jpg"), "same");
+        Files.writeString(tempDir.resolve("duplicate.jpg"), "same");
+        Path cache = tempDir.resolve("hashes.properties");
+        new FileHelper(List.of(tempDir), new ScanProgress(), DiskType.HDD, cache).scan();
+        Path journal = cache.resolveSibling(cache.getFileName() + ".journal");
+        Files.writeString(journal, "# duplicate-file-remover-hash-cache-journal-v999%n".formatted());
+        List<String> warnings = new ArrayList<>();
+        ScanProgress progress = new ScanProgress();
+        progress.setWarningHandler(warnings::add);
+
+        ScanResult result = new FileHelper(List.of(tempDir), progress, DiskType.HDD, cache).scan();
+
+        assertThat(result.duplicateCount()).isEqualTo(1);
+        assertThat(warnings).singleElement().asString().contains("Unsupported hash cache journal version");
+        assertThat(journal).doesNotExist();
+        assertThat(Files.readString(cache)).startsWith("# duplicate-file-remover-hash-cache-v2");
     }
 
     @Test

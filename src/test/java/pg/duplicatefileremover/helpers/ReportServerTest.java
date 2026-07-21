@@ -246,7 +246,7 @@ class ReportServerTest {
     }
 
     @Test
-    void forceDeletesRegisteredDuplicateChangedAfterScan(@TempDir Path tempDir) throws Exception {
+    void preservesRegisteredDuplicateChangedAfterScan(@TempDir Path tempDir) throws Exception {
         Path original = Files.writeString(tempDir.resolve("origin.jpg"), "same-content");
         Path duplicate = Files.writeString(tempDir.resolve("duplicate.jpg"), "same-content");
         String hash = FileHelper.getSHAHashForFile(original);
@@ -259,16 +259,17 @@ class ReportServerTest {
 
         try (ReportServer server = new ReportServer(result, report);
              HttpClient client = HttpClient.newHttpClient()) {
-            Files.writeString(duplicate, "changed-content");
+            Files.writeString(duplicate, "new!-content");
             server.start();
-            HttpResponse<Void> response = client.send(
+            HttpResponse<String> response = client.send(
                     duplicateDeleteRequest(server, duplicate).build(),
-                    HttpResponse.BodyHandlers.discarding()
+                    HttpResponse.BodyHandlers.ofString()
             );
 
-            assertThat(response.statusCode()).isEqualTo(204);
+            assertThat(response.statusCode()).isEqualTo(409);
+            assertThat(response.body()).isEqualTo("File changed after scanning and was preserved");
             assertThat(original).exists();
-            assertThat(duplicate).doesNotExist();
+            assertThat(duplicate).exists();
         }
     }
 
